@@ -75,7 +75,10 @@ on `main`. Production branch previews are disabled. Other branches upload previe
 versions with `npx wrangler versions upload --env staging`; these share staging
 D1/R2, so coordinate state-changing tests between branches.
 
-Automatic preview and merge deployment verification is in progress in OUT-5.
+Automatic staging preview build passed for setup commit `d3d771e`. Current build,
+merge, and deployment evidence is recorded in [OUT-5](https://linear.app/outpredict/issue/OUT-5/prepare-autonomous-development-tooling)
+and [PR #1](https://github.com/kingofsunnyvale/outpredict/pull/1). Always inspect the
+checks for the latest commit and verify health after merging.
 
 ## Other verified capabilities and deferred work
 
