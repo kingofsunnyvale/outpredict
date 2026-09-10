@@ -1,4 +1,5 @@
 import { authIsConfigured, createAuth } from "./auth";
+import { getCorpusStats, inspectProfile } from "./cohort";
 import { publicPage } from "./public-pages";
 
 function json(data: unknown, status = 200, headers = new Headers()): Response {
@@ -39,6 +40,42 @@ export default {
         googleSignIn: authIsConfigured(env) && origin === env.AUTH_URL,
         environment: env.ENVIRONMENT,
       });
+    }
+
+    if (pathname.startsWith("/api/corpus/")) {
+      if (request.method !== "GET")
+        return json({ error: "Method not allowed" }, 405);
+      try {
+        if (pathname === "/api/corpus/stats")
+          return json(await getCorpusStats(env.DB));
+        const match = pathname.match(/^\/api\/corpus\/profiles\/([^/]+)$/);
+        if (!match) return json({ error: "Not found" }, 404);
+        if (!authIsConfigured(env) || origin !== env.AUTH_URL)
+          return json(
+            { error: "Sign in on the configured Outpredict website." },
+            401,
+          );
+        const session = await createAuth(env).api.getSession({
+          headers: request.headers,
+        });
+        if (!session) return json({ error: "Sign in to continue." }, 401);
+        const profile = await inspectProfile(
+          env.DB,
+          decodeURIComponent(match[1] ?? ""),
+        );
+        return profile
+          ? json({ profile })
+          : json({ error: "Profile not found." }, 404);
+      } catch {
+        console.error(JSON.stringify({ event: "corpus_request_failed" }));
+        return json(
+          {
+            error:
+              "Applicant evidence is temporarily unavailable. Please try again.",
+          },
+          503,
+        );
+      }
     }
 
     if (pathname === "/api/me" || pathname.startsWith("/api/auth/")) {
