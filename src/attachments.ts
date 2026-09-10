@@ -1,4 +1,8 @@
-import { attachmentMetadata, ownedChat } from "./chat-store";
+import {
+  type AttachmentRow,
+  attachmentMetadata,
+  ownedChat,
+} from "./chat-store";
 import { PRODUCT_LIMITS, ProductError } from "./product-types";
 
 const MIME_TYPES: Record<string, string> = {
@@ -10,6 +14,39 @@ const MIME_TYPES: Record<string, string> = {
   jpg: "image/jpeg",
   jpeg: "image/jpeg",
 };
+
+/** Worker termination can skip catch/finally. Reconcile at most one user's
+ * storage cap, after a grace period longer than the extraction deadline. */
+export async function reconcileStaleAttachments(env: Env, userId: string) {
+  const result = await env.DB.prepare(
+    "UPDATE attachment SET status = 'failed', extracted_text = NULL, error = ? WHERE user_id = ? AND status = 'processing' AND id IN (SELECT id FROM attachment WHERE user_id = ? AND status = 'processing' AND created_at <= ? ORDER BY created_at LIMIT ?)",
+  )
+    .bind(
+      "Processing was interrupted. Download the original if available, then remove this file and upload it again or paste the text.",
+      userId,
+      userId,
+      Date.now() - 180_000,
+      PRODUCT_LIMITS.filesPerUser,
+    )
+    .run();
+  if (result.meta.changes)
+    console.warn(
+      JSON.stringify({
+        event: "attachment_processing_reconciled",
+        count: result.meta.changes,
+      }),
+    );
+  return result.meta.changes;
+}
+
+async function currentAttachment(env: Env, userId: string, id: string) {
+  const row = await env.DB.prepare(
+    "SELECT * FROM attachment WHERE id = ? AND user_id = ?",
+  )
+    .bind(id, userId)
+    .first<AttachmentRow>();
+  return row ? attachmentMetadata(row) : null;
+}
 
 /** Checks streamed bytes as well as Content-Length; chunked uploads are bounded. */
 export async function readBoundedBody(
@@ -299,6 +336,8 @@ export async function uploadAttachment(
       .bind(text, id, userId)
       .run();
     if (!saved.meta.changes) {
+      const current = await currentAttachment(env, userId, id);
+      if (current) return current;
       await env.DATA.delete(key);
       throw new ProductError(
         409,
@@ -345,11 +384,20 @@ export async function uploadAttachment(
         .run();
     else {
       const failed = await env.DB.prepare(
-        "UPDATE attachment SET status = 'failed', error = ?, extracted_text = NULL WHERE id = ? AND user_id = ?",
+        "UPDATE attachment SET status = 'failed', error = ?, extracted_text = NULL WHERE id = ? AND user_id = ? AND status = 'processing'",
       )
         .bind(failure.message, id, userId)
         .run();
-      if (!failed.meta.changes) await env.DATA.delete(key);
+      if (!failed.meta.changes) {
+        const current = await currentAttachment(env, userId, id);
+        if (current) return current;
+        await env.DATA.delete(key);
+        throw new ProductError(
+          409,
+          "This upload was removed before extraction finished.",
+          "upload_removed",
+        );
+      }
     }
     console.warn(
       JSON.stringify({

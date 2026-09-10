@@ -451,6 +451,168 @@ describe("recoverable conversation removal", () => {
 });
 
 describe("private optional attachments", () => {
+  it("reconciles only stale owned processing uploads while preserving originals and usage", async () => {
+    const alice = await account();
+    const bob = await account();
+    const chat = await createChat(env, alice.id);
+    const stale = (await upload(alice, "stale.txt", undefined, chat.id))
+      .attachment;
+    const recent = (await upload(alice, "recent.txt")).attachment;
+    const ready = (await upload(alice, "ready.txt")).attachment;
+    const foreign = (await upload(bob)).attachment;
+    const past = Date.now() - 180_001;
+    await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE attachment SET status = 'processing', extracted_text = NULL, created_at = ? WHERE id IN (?,?)",
+      ).bind(past, stale.id, foreign.id),
+      env.DB.prepare(
+        "UPDATE attachment SET status = 'processing', extracted_text = NULL WHERE id = ?",
+      ).bind(recent.id),
+    ]);
+    const before = await env.DB.prepare(
+      "SELECT COUNT(*) AS files, SUM(size) AS bytes FROM attachment WHERE user_id = ?",
+    )
+      .bind(alice.id)
+      .first();
+    const detail = await api(alice, `/api/chats/${chat.id}`);
+    expect(
+      (await detail.json<{ attachments: Attachment[] }>()).attachments[0],
+    ).toMatchObject({
+      id: stale.id,
+      status: "failed",
+      error: expect.stringContaining("interrupted"),
+    });
+    const listed = await (await api(alice, "/api/attachments")).json<{
+      attachments: Attachment[];
+    }>();
+    expect(
+      listed.attachments.find((file) => file.id === recent.id)?.status,
+    ).toBe("processing");
+    expect(
+      listed.attachments.find((file) => file.id === ready.id)?.status,
+    ).toBe("ready");
+    expect((await getAttachment(env, bob.id, foreign.id)).status).toBe(
+      "processing",
+    );
+    expect(
+      await env.DB.prepare(
+        "SELECT COUNT(*) AS files, SUM(size) AS bytes FROM attachment WHERE user_id = ?",
+      )
+        .bind(alice.id)
+        .first(),
+    ).toEqual(before);
+    expect(
+      await env.DB.prepare(
+        "SELECT requests FROM daily_file_usage WHERE user_id = ? AND day = ?",
+      )
+        .bind(alice.id, Math.floor(Date.now() / 86_400_000))
+        .first("requests"),
+    ).toBe(3);
+    expect(
+      await (
+        await api(alice, `/api/attachments/${stale.id}?download=1`)
+      ).text(),
+    ).toContain("250 completed hours");
+    expect(
+      (await getChatContext(env, alice.id, chat.id)).documents,
+    ).toHaveLength(0);
+    await expect(
+      beginMessagePair(env, alice.id, {
+        chatId: chat.id,
+        requestId: crypto.randomUUID(),
+        content: "Use this interrupted upload",
+        attachmentIds: [stale.id],
+      }),
+    ).rejects.toMatchObject({ code: "attachment_unavailable" });
+    await api(alice, `/api/attachments/${stale.id}`, "DELETE");
+    expect((await api(alice, `/api/attachments/${stale.id}`)).status).toBe(404);
+  });
+
+  it.each(["success", "failure"])(
+    "does not resurrect or delete a reconciled original after late extraction %s",
+    async (outcome) => {
+      const user = await account();
+      type Conversion = {
+        id: string;
+        name: string;
+        mimeType: string;
+        format: "markdown";
+        tokens: number;
+        data: string;
+      };
+      let complete!: (value: Conversion) => void;
+      let fail!: (error: Error) => void;
+      let started!: () => void;
+      const readyToReconcile = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const deferred = new Promise<Conversion>((resolve, reject) => {
+        complete = resolve;
+        fail = reject;
+      });
+      const conversion = vi
+        .spyOn(env.AI, "toMarkdown")
+        .mockImplementation(async () => {
+          started();
+          return deferred;
+        });
+      const pending = upload(
+        user,
+        "resume.pdf",
+        "%PDF-1.7\nsynthetic interrupted PDF",
+      );
+      const value: Conversion = {
+        id: "converted",
+        name: "resume.pdf",
+        mimeType: "application/pdf",
+        format: "markdown",
+        tokens: 10,
+        data: "Completed clinical volunteering: 250 hours.",
+      };
+      try {
+        await readyToReconcile;
+        const row = await env.DB.prepare(
+          "SELECT id, r2_key FROM attachment WHERE user_id = ?",
+        )
+          .bind(user.id)
+          .first<{ id: string; r2_key: string }>();
+        if (!row) throw new Error("The upload was not reserved");
+        await env.DB.prepare(
+          "UPDATE attachment SET created_at = ? WHERE id = ?",
+        )
+          .bind(Date.now() - 180_001, row.id)
+          .run();
+        const reconciled = await (
+          await api(user, `/api/attachments/${row.id}`)
+        ).json<{ attachment: Attachment }>();
+        expect(reconciled.attachment.status).toBe("failed");
+        if (outcome === "success") complete(value);
+        else fail(new Error("late provider failure"));
+        const result = await pending;
+        expect(result.attachment).toMatchObject({
+          id: row.id,
+          status: "failed",
+          error: expect.stringContaining("interrupted"),
+        });
+        expect(
+          (await getAttachment(env, user.id, row.id)).extracted_text,
+        ).toBeNull();
+        expect(await env.DATA.get(row.r2_key)).not.toBeNull();
+        expect(
+          await env.DB.prepare(
+            "SELECT requests FROM daily_file_usage WHERE user_id = ? AND day = ?",
+          )
+            .bind(user.id, Math.floor(Date.now() / 86_400_000))
+            .first("requests"),
+        ).toBe(1);
+      } finally {
+        complete(value);
+        await pending.catch(() => undefined);
+        conversion.mockRestore();
+      }
+    },
+  );
+
   it("extracts text, keeps originals private, and removes files from future context", async () => {
     const alice = await account();
     const bob = await account();

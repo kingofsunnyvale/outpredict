@@ -5,6 +5,7 @@
  * node scripts/smoke-product.mjs --env staging
  * node scripts/smoke-product.mjs --env staging --storage-only
  * node scripts/smoke-product.mjs --env production --agent
+ * node scripts/smoke-product.mjs --env staging --agent --report /tmp/corpus-smoke.json
  * node scripts/smoke-product.mjs --env staging --cleanup /tmp/.../cleanup.json
  * node scripts/smoke-product.mjs --self-test
  *
@@ -13,6 +14,7 @@
  * the product endpoints first. --storage-only skips the streaming endpoint for
  * the storage release. Default checks do not call AI. --agent retries
  * one synthetic cancelled turn through the real agent and consumes normal usage.
+ * --report writes only the resulting answer, evidence, and summarized progress.
  * This verifies signed database sessions; it does not replace a Google OAuth
  * browser round trip. Synthetic history/cancellation fixtures are seeded in D1.
  *
@@ -60,7 +62,7 @@ function argumentsFor(argv) {
     else if (flag === "--self-test") options.selfTest = true;
     else if (flag === "--agent") options.agent = true;
     else if (flag === "--storage-only") options.storageOnly = true;
-    else if (flag === "--env" || flag === "--cleanup") {
+    else if (flag === "--env" || flag === "--cleanup" || flag === "--report") {
       ensure(argv[i + 1] && !argv[i + 1].startsWith("--"), "missing_argument");
       options[flag.slice(2)] = argv[++i];
     } else throw new SmokeFailure("unknown_argument");
@@ -75,6 +77,7 @@ function argumentsFor(argv) {
     !(options.storageOnly && options.agent),
     "storage_only_cannot_run_agent",
   );
+  ensure(!options.report || options.agent, "report_requires_agent");
   return options;
 }
 
@@ -715,6 +718,7 @@ async function main(options) {
 
     if (options.agent) {
       phase = "real_agent_retry";
+      const progressEvents = [];
       const startedAt = Date.now();
       const progress = setInterval(
         () =>
@@ -730,10 +734,23 @@ async function main(options) {
           await post(
             `${path}/messages`,
             cookieA,
-            { content: question, requestId: cancelled.request, retry: true },
+            {
+              content: question,
+              requestId: cancelled.request,
+              retry: true,
+            },
             { stream: true },
           ),
           async (event) => {
+            if (event.type === "progress" && progressEvents.length < 100) {
+              progressEvents.push(
+                Object.fromEntries(
+                  ["stage", "title", "detail"]
+                    .filter((key) => typeof event[key] === "string")
+                    .map((key) => [key, event[key].slice(0, 1000)]),
+                ),
+              );
+            }
             if (event.type !== "meta") return;
             ensure(
               event.assistantMessageId !== cancelled.assistant,
@@ -754,32 +771,67 @@ async function main(options) {
       } finally {
         clearInterval(progress);
       }
+      if (options.report) {
+        // Exclusive creation prevents replacing an existing credential/artifact.
+        // No cookies, headers, session IDs, or model metadata are saved.
+        await writeFile(
+          resolve(options.report),
+          JSON.stringify(
+            {
+              answer: result.text,
+              evidence: result.evidence,
+              progress: progressEvents,
+            },
+            null,
+            2,
+          ),
+          { mode: 0o600, flag: "wx" },
+        );
+      }
       ensure(
         result.status === "complete" && result.text.length >= 20,
         "agent_answer_incomplete",
       );
-      ensure(
-        result.evidence?.cohort?.totalProfiles === expected.sourceAccounts,
-        "agent_corpus_not_used",
-      );
-      const cohort = result.evidence.cohort;
-      ensure(
-        cohort.matchedProfiles >= cohort.examinedProfiles &&
-          cohort.examinedProfiles > 0,
-        "agent_cohort_counts_invalid",
-      );
-      const cited = new Set(
-        [...result.text.matchAll(/\[(P\d+)\]/g)].map((match) => match[1]),
-      );
-      const supporting = new Set(
-        result.evidence.sources
-          .filter((source) => source.kind === "profile" && cited.has(source.id))
-          .map((source) => source.applicantId),
-      );
-      ensure(
-        supporting.size > 0 && cohort.supportingProfiles === supporting.size,
-        "agent_supporting_count_mismatch",
-      );
+      {
+        ensure(
+          result.evidence?.cohort?.totalProfiles === expected.sourceAccounts,
+          "agent_corpus_not_used",
+        );
+        ensure(
+          !result.evidence.sources.some((source) =>
+            ["official", "web"].includes(source.kind),
+          ),
+          "agent_unexpected_external_source",
+        );
+        ensure(
+          !progressEvents.some((event) =>
+            ["public_search", "fetch_public_page"].includes(event.stage),
+          ),
+          "agent_unexpected_external_tool",
+        );
+        const cohort = result.evidence.cohort;
+        ensure(
+          cohort.matchedProfiles >= cohort.examinedProfiles &&
+            cohort.examinedProfiles > 0,
+          "agent_cohort_counts_invalid",
+        );
+        const cited = new Set(
+          [...result.text.matchAll(/\[([^\]\n]{1,100})\]/g)].flatMap(
+            (match) => match[1].match(/\bP\d+\b/g) ?? [],
+          ),
+        );
+        const supporting = new Set(
+          result.evidence.sources
+            .filter(
+              (source) => source.kind === "profile" && cited.has(source.id),
+            )
+            .map((source) => source.applicantId),
+        );
+        ensure(
+          supporting.size > 0 && cohort.supportingProfiles === supporting.size,
+          "agent_supporting_count_mismatch",
+        );
+      }
       const saved = await jsonBody(await api(path, cookieA));
       ensure(
         saved.messages.at(-1)?.status === "complete" &&
@@ -790,9 +842,9 @@ async function main(options) {
       report(phase, {
         status: "passed",
         characters: result.text.length,
-        matched: cohort.matchedProfiles,
-        examined: cohort.examinedProfiles,
-        supporting: cohort.supportingProfiles,
+        matched: result.evidence.cohort.matchedProfiles,
+        examined: result.evidence.cohort.examinedProfiles,
+        supporting: result.evidence.cohort.supportingProfiles,
       });
     }
     phase = "chat_delete";
@@ -841,6 +893,16 @@ async function main(options) {
 
 async function selfTest() {
   ensure(argumentsFor(["--env", "staging", "--agent"]).agent, "arguments_test");
+  ensure(
+    argumentsFor([
+      "--env",
+      "staging",
+      "--agent",
+      "--report",
+      "/tmp/report.json",
+    ]).report,
+    "report_arguments_test",
+  );
   ensure(
     argumentsFor(["--env", "staging", "--storage-only"]).storageOnly,
     "storage_only_arguments_test",
@@ -903,7 +965,7 @@ try {
   const options = argumentsFor(process.argv.slice(2));
   if (options.help) {
     console.log(
-      "Usage: node scripts/smoke-product.mjs --env staging|production [--storage-only | --agent]\n       node scripts/smoke-product.mjs --env staging|production --cleanup PATH\n       node scripts/smoke-product.mjs --self-test\nCreates only synthetic fixtures and cleans them up. --storage-only skips all streaming endpoint checks. Default verifies stored-answer replay without AI calls. --agent adds one real streamed retry and cannot be combined with --storage-only. Requires deployed product migrations/endpoints, local auth secrets, and Wrangler credentials. Reports omit tokens and response content.",
+      "Usage: node scripts/smoke-product.mjs --env staging|production [--storage-only | --agent] [--report NEW_PATH]\n       node scripts/smoke-product.mjs --env staging|production --cleanup PATH\n       node scripts/smoke-product.mjs --self-test\nCreates only synthetic fixtures and cleans them up. --storage-only skips streaming. Default verifies replay without AI. --agent adds one real corpus comparison retry. --report requires a real-agent mode and writes only answer/evidence/progress to a new mode-0600 file. Real-agent modes cannot be combined with --storage-only. Requires deployed migrations/endpoints, local auth secrets, and Wrangler credentials. Console output omits tokens and answer content.",
     );
   } else if (options.selfTest) await selfTest();
   else await main(options);
