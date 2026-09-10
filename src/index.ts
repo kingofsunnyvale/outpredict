@@ -1,4 +1,5 @@
 import { authIsConfigured, createAuth } from "./auth";
+import { handleChatApi } from "./chat-api";
 import { getCorpusStats, inspectProfile } from "./cohort";
 import { publicPage } from "./public-pages";
 
@@ -72,6 +73,48 @@ export default {
           {
             error:
               "Applicant evidence is temporarily unavailable. Please try again.",
+          },
+          503,
+        );
+      }
+    }
+
+    if (
+      pathname === "/api/chats" ||
+      pathname.startsWith("/api/chats/") ||
+      pathname === "/api/attachments" ||
+      pathname.startsWith("/api/attachments/")
+    ) {
+      if (!authIsConfigured(env))
+        return json({ error: "Sign-in is temporarily unavailable." }, 503);
+      if (origin !== env.AUTH_URL)
+        return json({ error: "Use the configured Outpredict website." }, 403);
+      try {
+        const { response: session, headers: sessionHeaders } = await createAuth(
+          env,
+        ).api.getSession({ headers: request.headers, returnHeaders: true });
+        if (!session)
+          return json({ error: "Sign in to continue." }, 401, sessionHeaders);
+        const response = await handleChatApi(request, env, {
+          id: session.user.id,
+          name: session.user.name,
+          email: session.user.email,
+        });
+        if (!response) return json({ error: "Not found" }, 404);
+        const headers = new Headers(response.headers);
+        for (const cookie of sessionHeaders.getSetCookie())
+          headers.append("Set-Cookie", cookie);
+        return new Response(response.body, {
+          status: response.status,
+          headers,
+        });
+      } catch {
+        console.error(
+          JSON.stringify({ event: "product_authentication_failed" }),
+        );
+        return json(
+          {
+            error: "This request is temporarily unavailable. Please try again.",
           },
           503,
         );
