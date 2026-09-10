@@ -1,7 +1,10 @@
 # Runtime and evidence
 
-Outpredict uses Workers AI for planning and streamed answers, D1 for the reviewed
-applicant corpus and private conversation state, and private R2 for uploads.
+Outpredict bases its admissions advice on the scraped student corpus and the
+student's own messages and uploads. Workers AI handles planning and answers;
+D1 stores the reviewed corpus and private conversation state, and private R2
+stores uploads. No outside search, webpage retrieval, or external admissions
+source is used by the product.
 The application is free. Authentication and per-user request/file limits protect
 the shared service; there are no paid tiers.
 
@@ -9,9 +12,8 @@ the shared service; there are no paid tiers.
 
 `src/agent.ts` selects tools according to the question. Ordinary questions and
 writing help can receive answers without a corpus search. Comparisons use
-`searchCohort`; current school facts use public source discovery followed by a
-read of the publisher's page. The bounded tool loop also supports profile
-inspection and deterministic arithmetic. A turn permits at most four planning
+`searchCohort`. The other tools inspect retrieved student profiles and perform
+deterministic arithmetic and time-budget calculations. A turn permits at most four planning
 rounds and seven tool calls, with individual tool limits and a 150-second overall
 deadline. Up to two cohort searches allow one refinement without increasing
 the total tool budget. Model/stream waits periodically check the conversation lease so a
@@ -47,13 +49,8 @@ truncated outputs, and interrupted streams preserve partial text with an error
 state. An empty model answer is an error, not a successful response. Retrying and
 saving a result are coordinated by the conversation store's generation lease.
 
-The verified default candidate is `@cf/zai-org/glm-5.3-flash`. Native tool calls
-and final streaming worked on the existing Cloudflare account. Model selection
-is configured by `AI_MODEL`; check the deployed configuration rather than
-assuming every environment has been changed. `gpt-oss-120b` was reachable but
-performed poorly on the bounded arithmetic/evidence-quality checks. More
-expensive GLM-5.2 did not materially improve those checks. Kimi K2.6 exhausted
-the bounded output budget on reasoning without an answer and was not selected.
+The verified model is `@cf/zai-org/glm-5.3-flash`, configured by `AI_MODEL`.
+Native tool calls and final streaming worked on the existing Cloudflare account.
 
 Models can still misinterpret evidence. Tests cover the deterministic boundaries;
 live answer review checks interpretation separately. Corpus medians are
@@ -90,7 +87,7 @@ Mixed-timing activity totals are also withheld from the model's cycle snapshot
 because the amount completed before that application is unknown.
 
 Follow-ups retain bounded historical source context without claiming a new
-search. Profile, webpage, calculation, and attachment citation numbers are not
+corpus query. Profile, calculation, and attachment citation numbers are not
 recycled. Retained attachments keep the same citation ID across follow-ups.
 If a new cohort is retrieved, its supporting count includes only that turn's
 latest retrieved cohort. Earlier sources remain available for citations; a
@@ -99,57 +96,22 @@ and statistics describe the latest search filters. Current attachments are
 supplied newest-first; when the document budget excludes older material, the
 evidence notes disclose it.
 
-## Public information discovery
+## Evidence boundary
 
-When `TAVILY_API_KEY` is configured, the backend uses Tavily basic search.
-Otherwise it discovers live links on verified official institution entry pages.
-`data/official-sites.json` covers all 176 supported institution/application-system
-names, with provenance URLs and a directory-review date. This is scoped official
-site discovery, not a broad or exhaustive web search. The directory date verifies
-the entry link/host, not every current policy or the reachability of every deep
-path. Each search reads at most two entry pages, returns up to five leads, and
-can recover a 404/410 entry by reading that same verified host's root once.
-Other failures do not trigger that fallback. The publisher page must be read
-before policy claims or citations are added. Discovery and reading record actual
-observation dates. Directory-verified .org/.com hosts are classified as official.
-Blocked/challenge/unreadable responses fail clearly. There is no challenge
-bypass, browser impersonation, or repeated probing of blocked endpoints.
+The product's only admissions evidence is the reviewed scraped student corpus
+and information supplied by the student. Its four tools are `cohort_search`,
+`profile_inspect`, `weekly_time_budget`, and `calculate`. There is no browser,
+search provider, public-page reader, or API credential for outside research.
+A URL in a message or document remains text; the agent does not open it.
+Original student-post links are retained only for corpus provenance and inspection.
 
-Public-search inputs are a finite set of public institutions and admissions
-topics. The server constructs the query; model-generated applicant names,
-document excerpts, arbitrary query strings, and additional fields are rejected.
-The institution list covers a broad range of US MD and DO schools. For an
-unrecognized school, the assistant can ask for an official URL while continuing
-general advice. Uploaded documents never supply fetch permissions.
-
-Page retrieval requires the exact URL to come from a search result, a historical
-public source, or an explicit URL in a user message. It accepts only public HTTPS
-addresses, rejects private/local/numeric addresses and credentials, checks
-redirects, sends no user cookies, and caps response bytes and text length.
-Being on an `.edu` or `.gov` domain alone does not authorize an arbitrary URL.
-Search snippets are discovery leads; citations are added after reading the
-publisher's page. Both credentialed API and publisher requests use manual
-redirect handling; API credentials are never forwarded through a redirect.
-
-On 2026-09-10 UTC, local outbound discovery and publisher retrieval succeeded
-for Stanford and UCLA. A subsequent deployed test showed that DuckDuckGo did
-not respond from a Cloudflare Worker within 12 seconds; this was a timeout,
-not a confirmed verification challenge. That route is no longer the no-key
-runtime fallback. A separate temporary Cloudflare Worker successfully read
-Stanford, UCLA, AAMC, and LCME official pages using the real bounded reader;
-LCME's same-host redirect was handled successfully. Both temporary Workers
-were deleted. Full integrated staging research remains a release check.
-
-Research errors distinguish network/timeout, HTTP, redirect, challenge, body,
-and parse failures using sanitized categories without logging query text or
-secrets. When no official page is read, the assistant asks for an official URL
-or pasted policy text instead of substituting remembered requirements.
-
-Cloudflare's experimental Web Search previously returned `account_disabled`.
-Gemini 2.5 grounded queries previously returned unavailable-model errors, and
-current Gemini 3 grounding is unavailable on the free API tier. Neither failed
-path is used as a silent fallback. Bing RSS was excluded because its response
-restricts use to personal noncommercial RSS aggregation.
+Historical student reports cannot verify current or future school requirements,
+deadlines, tuition, eligibility, or official rules. The answer must say when the
+available data cannot establish a requested fact. It must not substitute remembered
+policies, outside citations, or claims about what most schools require. Student-
+supplied text can be discussed as their input without claiming it was independently
+verified. Legacy answers backed by outside sources are excluded from future model
+context, and their source evidence is not carried into new answers.
 
 ## Attachments
 
@@ -183,13 +145,19 @@ it from future context, along with private file storage and extracted text.
 
 ## Verification and references
 
-`test/agent.test.ts` exercises private-query rejection, URL provenance/redirect
-guards, body limits, explicit arithmetic, real tool dispatch, source-account
+`test/agent.test.ts` exercises the closed corpus/input tool boundary, rejection
+of removed outside tools without network access, explicit arithmetic, real tool dispatch, source-account
 deduplication, cycle-conditional outcomes, newest-file context, reasoning
 suppression, incomplete streams, and lease cancellation. Provider checks use
 synthetic applicant documents and real reviewed public corpus records, never
 private user records. Credentials are loaded from ignored/secret stores and
 are not included in artifacts or logs.
+
+A live corpus-only boundary check asked for current Stanford requirements and
+included a webpage URL. The answer correctly said it could not open the page or
+verify current/upcoming policy from student reports, made no requirements claims,
+and returned no sources. It completed in approximately eight seconds without an
+outside research tool call.
 
 The final targeted synthetic résumé check completed in approximately 42 seconds.
 It reserved three hours for clinical activity and one for application work within
@@ -211,7 +179,3 @@ used in these model checks.
 - [Markdown conversion binding](https://developers.cloudflare.com/workers-ai/features/markdown-conversion/usage/binding/)
 - [Markdown conversion behavior](https://developers.cloudflare.com/workers-ai/features/markdown-conversion/how-it-works/)
 - [GLM-5.3-Flash](https://developers.cloudflare.com/workers-ai/models/glm-5.3-flash/)
-- [Tavily search](https://docs.tavily.com/documentation/api-reference/endpoint/search)
-- [Tavily credits](https://docs.tavily.com/documentation/api-credits)
-- [AAMC prerequisite directory](https://students-residents.aamc.org/medical-school-admission-requirements/required-premedical-coursework-and-competencies)
-- [LCME accredited programs](https://lcme.org/directory/accredited-programs/)

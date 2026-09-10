@@ -1,7 +1,6 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import corpus from "../data/corpus.json";
-import officialSites from "../data/official-sites.json";
 import {
   type AgentEvent,
   AgentFailure,
@@ -17,20 +16,6 @@ import {
 } from "../src/agent";
 import type { CorpusProfile } from "../src/cohort";
 import type { Evidence } from "../src/product-types";
-import {
-  buildPublicQuery,
-  discoverDuckDuckGoPages,
-  extractHtmlText,
-  fetchPublicPage,
-  isOfficialUrl,
-  PUBLIC_INSTITUTIONS,
-  parseOfficialLinks,
-  parseSearchLinks,
-  publicSearch,
-  readBoundedText,
-  validatePublicUrl,
-  validateSearchQuery,
-} from "../src/research";
 
 function stream(events: unknown[], done = true): ReadableStream<Uint8Array> {
   const wire =
@@ -566,20 +551,13 @@ describe("model evidence and stream boundaries", () => {
     expect(requests).toHaveLength(3);
   });
 
-  it("reclassifies refreshed sources by the final URL without mutating profile evidence", async () => {
-    const from = "https://med.stanford.edu/md-admissions.html";
-    const to = "https://example.org/admissions";
+  it("exposes only corpus and calculation tools and never fetches user URLs or legacy outside sources", async () => {
     const requests: unknown[] = [];
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
-      .mockImplementation(async (url) =>
-        String(url) === from
-          ? new Response(null, { status: 302, headers: { Location: to } })
-          : new Response(
-              "This is an independently published admissions discussion page with sufficient readable text for a bounded source request.",
-              { headers: { "Content-Type": "text/plain" } },
-            ),
-      );
+      .mockImplementation(async () => {
+        throw new Error("No outside request may run");
+      });
     try {
       const result = await runAgent({
         env: {
@@ -592,11 +570,11 @@ describe("model evidence and stream boundaries", () => {
                     message: {
                       tool_calls: [
                         {
-                          id: "refresh",
+                          id: "removed",
                           type: "function",
                           function: {
-                            name: "fetch_public_page",
-                            arguments: JSON.stringify({ url: from }),
+                            name: "public_search",
+                            arguments: '{"institution":"Stanford"}',
                           },
                         },
                       ],
@@ -611,7 +589,7 @@ describe("model evidence and stream boundaries", () => {
                     {
                       delta: {
                         content:
-                          "Current official requirements could not be verified.",
+                          "The student corpus cannot verify current school requirements.",
                       },
                     },
                   ],
@@ -624,38 +602,40 @@ describe("model evidence and stream boundaries", () => {
         messages: [
           {
             role: "assistant",
-            content: "A previous source [W1].",
+            content: "OBSOLETE_POLICY_ONLY [W1]",
             evidence: {
               sources: [
                 {
-                  id: "P1",
-                  kind: "profile",
-                  title: "Profile",
-                  url: from,
-                  applicantId: "account",
-                },
-                {
                   id: "W1",
                   kind: "official",
-                  title: "Old official page",
-                  url: from,
+                  title: "Old outside policy",
+                  url: "https://example.edu/policy",
+                  excerpt: "OBSOLETE_POLICY_ONLY",
                 },
               ],
             },
           },
-          { role: "user", content: `Please refresh ${from} and ${to}` },
+          {
+            role: "user",
+            content:
+              "What are the current requirements at https://example.edu/policy?",
+          },
         ],
         onEvent: async () => {},
       });
-      expect(
-        result.evidence.sources.find((source) => source.id === "W1"),
-      ).toMatchObject({ kind: "web", url: to });
-      expect(
-        result.evidence.sources.find((source) => source.id === "P1"),
-      ).toMatchObject({ kind: "profile", url: from });
-      expect(JSON.stringify(requests.at(-1))).toContain(
-        "No official page was successfully read",
-      );
+      const first = requests[0] as {
+        tools: Array<{ function: { name: string } }>;
+      };
+      expect(first.tools.map((tool) => tool.function.name)).toEqual([
+        "cohort_search",
+        "profile_inspect",
+        "weekly_time_budget",
+        "calculate",
+      ]);
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(JSON.stringify(requests)).not.toContain("OBSOLETE_POLICY_ONLY");
+      expect(result.evidence.sources).toEqual([]);
+      expect(result.content).toContain("cannot verify current");
     } finally {
       fetchMock.mockRestore();
     }
@@ -712,297 +692,5 @@ describe("model evidence and stream boundaries", () => {
         onEvent: async () => {},
       }),
     ).rejects.toMatchObject({ name: "AgentFailure", cancelled: true });
-  });
-});
-
-describe("bounded public research", () => {
-  it("has source-attributed public entry URLs for every supported institution", () => {
-    expect(officialSites.map((entry) => entry.institution).sort()).toEqual(
-      [...PUBLIC_INSTITUTIONS].sort(),
-    );
-    for (const entry of officialSites) {
-      expect(entry.urls.length).toBeGreaterThan(0);
-      expect(entry.sourceUrls.length).toBeGreaterThan(0);
-      expect(entry.verifiedAt).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-      for (const url of entry.urls)
-        expect(isOfficialUrl(validatePublicUrl(url))).toBe(true);
-      for (const url of entry.sourceUrls)
-        expect(() => validatePublicUrl(url)).not.toThrow();
-    }
-  });
-  it("classifies network, redirect, challenge, and malformed-provider failures without logging private data", async () => {
-    const log = vi.spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      await expect(
-        publicSearch(undefined, "Stanford admissions", undefined, async () => {
-          throw new TypeError("private-native-detail");
-        }),
-      ).rejects.toMatchObject({ code: "research_network_error" });
-      await expect(
-        discoverDuckDuckGoPages(
-          "Stanford admissions",
-          undefined,
-          async () =>
-            new Response(null, {
-              status: 302,
-              headers: { Location: "https://html.duckduckgo.com/html/" },
-            }),
-        ),
-      ).rejects.toMatchObject({ code: "search_redirect" });
-      await expect(
-        discoverDuckDuckGoPages(
-          "Stanford admissions",
-          undefined,
-          async () =>
-            new Response('<form id="challenge-form"></form>', { status: 202 }),
-        ),
-      ).rejects.toMatchObject({ code: "search_challenge" });
-      await expect(
-        publicSearch(
-          "private-api-key",
-          "Stanford admissions",
-          undefined,
-          async () => new Response("invalid json"),
-        ),
-      ).rejects.toMatchObject({ code: "search_invalid_response" });
-      expect(JSON.stringify(log.mock.calls)).not.toContain(
-        "private-native-detail",
-      );
-      expect(JSON.stringify(log.mock.calls)).not.toContain("private-api-key");
-      expect(JSON.stringify(log.mock.calls)).not.toContain(
-        "Stanford admissions",
-      );
-    } finally {
-      log.mockRestore();
-    }
-  });
-
-  it("constructs a supported Workers request with explicit manual redirect handling", async () => {
-    const results = await publicSearch(
-      undefined,
-      "Stanford admissions",
-      undefined,
-      async (input, init) => {
-        const request = new Request(input, init);
-        expect(request.redirect).toBe("manual");
-        return new Response(
-          "<title>MD Admissions</title><p>Review the official medical school admissions pages for detailed application information and current requirements.</p>",
-          { headers: { "Content-Type": "text/html" } },
-        );
-      },
-    );
-    expect(results[0]?.url).toBe("https://med.stanford.edu/md-admissions.html");
-  });
-
-  it("does not forward a Tavily credential through redirects", async () => {
-    const fetcher = vi.fn(
-      async (_url: RequestInfo | URL, init?: RequestInit) => {
-        expect(init?.redirect).toBe("manual");
-        return new Response(null, {
-          status: 302,
-          headers: { Location: "https://example.org/" },
-        });
-      },
-    );
-    await expect(
-      publicSearch("test-key", "Stanford admissions", undefined, fetcher),
-    ).rejects.toMatchObject({ code: "search_redirect" });
-    expect(fetcher).toHaveBeenCalledTimes(1);
-  });
-
-  it("ranks official same-host policy links and recovers stale directory paths only through their root", async () => {
-    const html =
-      '<title>Admissions</title><main><p>The current medical school admissions website provides application policies and academic preparation information for prospective students.</p><a href="/md-admissions/academic-requirements.html">Academic requirements</a><a href="https://example.org/requirements">External requirements</a><a href="https://localhost./">Admissions</a></main>';
-    const links = parseOfficialLinks(
-      html,
-      "https://med.stanford.edu/",
-      "academic requirements and prerequisites",
-    );
-    expect(links.map((link) => link.url)).toEqual([
-      "https://med.stanford.edu/md-admissions/academic-requirements.html",
-    ]);
-    const fetched: string[] = [];
-    const results = await publicSearch(
-      undefined,
-      "Stanford admissions academic requirements",
-      undefined,
-      async (input) => {
-        const url = String(input);
-        fetched.push(url);
-        return new URL(url).pathname === "/"
-          ? new Response(html, { headers: { "Content-Type": "text/html" } })
-          : new Response(null, { status: 404 });
-      },
-    );
-    expect(fetched).toContain("https://med.stanford.edu/");
-    expect(fetched.length).toBeLessThanOrEqual(4);
-    expect(results[0]).toMatchObject({
-      method: "official_site",
-      discoveredFrom: "https://med.stanford.edu/",
-      url: "https://med.stanford.edu/md-admissions/academic-requirements.html",
-    });
-    expect(isOfficialUrl(new URL("https://medschool.kp.org/admissions"))).toBe(
-      true,
-    );
-    const rejected = vi.fn(async () => new Response(null, { status: 403 }));
-    await expect(
-      publicSearch(undefined, "Stanford admissions", undefined, rejected),
-    ).rejects.toMatchObject({ code: "source_http_error" });
-    expect(rejected.mock.calls.length).toBeLessThanOrEqual(2);
-  });
-
-  it("rejects trailing-dot redirect targets before any second request", async () => {
-    const fetcher = vi.fn(
-      async () =>
-        new Response(null, {
-          status: 302,
-          headers: { Location: "https://metadata.google.internal./" },
-        }),
-    );
-    await expect(
-      fetchPublicPage(
-        "https://aamc.org/",
-        new Set(["https://aamc.org/"]),
-        undefined,
-        fetcher,
-      ),
-    ).rejects.toThrow("Only public");
-    expect(fetcher).toHaveBeenCalledTimes(1);
-  });
-
-  it("constructs searches solely from public topics and rejects private names and forged URLs", async () => {
-    expect(
-      buildPublicQuery({
-        institution: "Stanford",
-        topic: "academic requirements and prerequisites",
-      }),
-    ).toBe(
-      "Stanford medical school admissions academic requirements and prerequisites",
-    );
-    expect(() =>
-      buildPublicQuery({
-        institution: "Jane Smith Eastside Clinic",
-        topic: "academic requirements and prerequisites",
-      }),
-    ).toThrow();
-    expect(() =>
-      buildPublicQuery({
-        institution: "Stanford",
-        topic: "academic requirements and prerequisites",
-        query: "Jane Smith",
-      }),
-    ).toThrow();
-    await expect(
-      fetchPublicPage(
-        "https://aamc.org/?applicant=Jane%20Smith",
-        new Set(),
-        undefined,
-        async () => {
-          throw new Error("Must never fetch");
-        },
-      ),
-    ).rejects.toThrow("Search for");
-  });
-  it("blocks private addresses, credentials, ports, and private applicant searches", () => {
-    for (const url of [
-      "http://stanford.edu",
-      "https://127.0.0.1/",
-      "https://[::1]/",
-      "https://2130706433/",
-      "https://user:secret@stanford.edu/",
-      "https://stanford.edu:8443/",
-      "https://metadata.google.internal/",
-      "https://127.0.0.1.nip.io/",
-      "https://localhost./",
-      "https://metadata.google.internal./",
-      "https://127.0.0.1.nip.io./",
-      "https://127.0.0.1.sslip.io./",
-      "https://localtest.me./",
-    ])
-      expect(() => validatePublicUrl(url)).toThrow();
-    expect(
-      validatePublicUrl("https://med.stanford.edu/admissions#requirements")
-        .href,
-    ).toBe("https://med.stanford.edu/admissions");
-    for (const query of [
-      "my 3.7 GPA at Stanford",
-      "Alex@example.com applicant",
-      "MCAT 512 school list",
-      "my resume research",
-    ])
-      expect(() => validateSearchQuery(query)).toThrow();
-    expect(
-      validateSearchQuery("Stanford MD admission requirements 2027"),
-    ).toContain("Stanford");
-  });
-
-  it("discovers public publisher links without reproducing search snippets", () => {
-    const rows = parseSearchLinks(
-      '<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fmed.stanford.edu%2Fmd-admissions.html&amp;rut=x">Search service headline</a><a class="result__a" href="https://127.0.0.1/private">Bad</a>',
-    );
-    expect(rows).toEqual([
-      {
-        title: "med.stanford.edu",
-        url: "https://med.stanford.edu/md-admissions.html",
-        content: "",
-      },
-    ]);
-  });
-
-  it("reads official HTML, strips executable/navigation content, and blocks unsafe redirects", async () => {
-    const html =
-      "<html><title>Official requirements</title><script>bad instruction()</script><nav>Navigation</nav><main><p>Applicants should review the following medical school admissions requirements for the coming application cycle.</p><p>Contact admissions for individual circumstances.</p></main></html>";
-    const page = await fetchPublicPage(
-      "https://med.stanford.edu/md-admissions.html",
-      new Set(["https://med.stanford.edu/md-admissions.html"]),
-      undefined,
-      async () =>
-        new Response(html, { headers: { "Content-Type": "text/html" } }),
-    );
-    expect(page.text).toContain("Applicants should review");
-    expect(page.text).not.toContain("bad instruction");
-    expect(extractHtmlText(html).title).toBe("Official requirements");
-    await expect(
-      fetchPublicPage(
-        "https://med.stanford.edu/md-admissions.html",
-        new Set(["https://med.stanford.edu/md-admissions.html"]),
-        undefined,
-        async () =>
-          new Response(null, {
-            status: 302,
-            headers: { Location: "http://169.254.169.254/latest/meta-data" },
-          }),
-      ),
-    ).rejects.toThrow();
-    await expect(
-      fetchPublicPage(
-        "https://unverified.example.com/",
-        new Set(),
-        undefined,
-        async () => new Response(html),
-      ),
-    ).rejects.toThrow();
-  });
-
-  it("enforces body limits and treats provider blocks as failures instead of empty evidence", async () => {
-    await expect(
-      readBoundedText(new Response("too large"), 3),
-    ).rejects.toThrow();
-    await expect(
-      publicSearch(
-        undefined,
-        "Stanford MD requirements",
-        undefined,
-        async () => new Response("challenge required", { status: 202 }),
-      ),
-    ).rejects.toThrow();
-    await expect(
-      publicSearch(
-        "test-key",
-        "Stanford MD requirements",
-        undefined,
-        async () => new Response("rate limited", { status: 429 }),
-      ),
-    ).rejects.toThrow();
   });
 });

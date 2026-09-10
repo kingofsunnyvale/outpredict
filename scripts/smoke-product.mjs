@@ -5,7 +5,7 @@
  * node scripts/smoke-product.mjs --env staging
  * node scripts/smoke-product.mjs --env staging --storage-only
  * node scripts/smoke-product.mjs --env production --agent
- * node scripts/smoke-product.mjs --env staging --research --report /tmp/research-smoke.json
+ * node scripts/smoke-product.mjs --env staging --agent --report /tmp/corpus-smoke.json
  * node scripts/smoke-product.mjs --env staging --cleanup /tmp/.../cleanup.json
  * node scripts/smoke-product.mjs --self-test
  *
@@ -14,7 +14,6 @@
  * the product endpoints first. --storage-only skips the streaming endpoint for
  * the storage release. Default checks do not call AI. --agent retries
  * one synthetic cancelled turn through the real agent and consumes normal usage.
- * --research selects current Stanford requirements instead of a corpus comparison.
  * --report writes only the resulting answer, evidence, and summarized progress.
  * This verifies signed database sessions; it does not replace a Google OAuth
  * browser round trip. Synthetic history/cancellation fixtures are seeded in D1.
@@ -45,8 +44,6 @@ const execute = promisify(execFile);
 const fixturePattern = /^outpredict-smoke-[a-f0-9-]{36}-[ab]$/;
 const question =
   "Use the reviewed applicant corpus with no filters. Compare two reported applicants and explain matched, examined, and supporting counts. State the sample limitations. Keep the answer under 200 words.";
-const researchQuestion =
-  "What are Stanford MD's current academic prerequisites? Search public information and read Stanford's official admissions page before answering. Cite the official page and distinguish required preparation from recommendations. This is a school-policy question, not an applicant comparison; do not use the applicant corpus. Keep the answer under 200 words.";
 const syntheticText =
   "Synthetic test résumé. GPA 3.75. MCAT 515. Clinical volunteering: 250 completed hours. This document contains no real person's information.";
 class SmokeFailure extends Error {}
@@ -58,16 +55,13 @@ function report(check, details = {}) {
 }
 
 function argumentsFor(argv) {
-  const options = { agent: false, storageOnly: false, research: false };
+  const options = { agent: false, storageOnly: false };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
     if (flag === "--help" || flag === "-h") options.help = true;
     else if (flag === "--self-test") options.selfTest = true;
     else if (flag === "--agent") options.agent = true;
-    else if (flag === "--research") {
-      options.research = true;
-      options.agent = true;
-    } else if (flag === "--storage-only") options.storageOnly = true;
+    else if (flag === "--storage-only") options.storageOnly = true;
     else if (flag === "--env" || flag === "--cleanup" || flag === "--report") {
       ensure(argv[i + 1] && !argv[i + 1].startsWith("--"), "missing_argument");
       options[flag.slice(2)] = argv[++i];
@@ -83,39 +77,8 @@ function argumentsFor(argv) {
     !(options.storageOnly && options.agent),
     "storage_only_cannot_run_agent",
   );
-  ensure(!options.report || options.agent, "report_requires_agent_or_research");
+  ensure(!options.report || options.agent, "report_requires_agent");
   return options;
-}
-
-function researchSummary(result, progress) {
-  const stages = new Set(progress.map((event) => event.stage));
-  ensure(
-    stages.has("public_search") && stages.has("fetch_public_page"),
-    "research_tools_not_used",
-  );
-  ensure(
-    !result.evidence?.cohort &&
-      !result.evidence?.sources?.some((source) => source.kind === "profile"),
-    "research_unexpected_cohort",
-  );
-  const cited = new Set(
-    [...result.text.matchAll(/\[(W\d+)\]/g)].map((match) => match[1]),
-  );
-  const official = (result.evidence?.sources ?? []).filter((source) => {
-    if (source.kind !== "official" || !cited.has(source.id)) return false;
-    try {
-      const url = new URL(source.url);
-      return (
-        url.protocol === "https:" &&
-        (url.hostname === "stanford.edu" ||
-          url.hostname.endsWith(".stanford.edu"))
-      );
-    } catch {
-      return false;
-    }
-  });
-  ensure(official.length > 0, "research_official_stanford_citation_missing");
-  return { officialSources: official.length };
 }
 
 function sessionCookie(token, secret) {
@@ -226,7 +189,6 @@ async function consumeEvents(response, onEvent = async () => {}) {
 
 async function main(options) {
   ensure(Number(process.versions.node.split(".")[0]) >= 24, "node_24_required");
-  const turnQuestion = options.research ? researchQuestion : question;
   const config = JSON.parse(
     await readFile(join(root, "wrangler.jsonc"), "utf8"),
   );
@@ -718,14 +680,7 @@ async function main(options) {
     const started = Date.now() + 2;
     await query(
       "INSERT INTO message (id,chat_id,role,content,status,client_request_id,created_at,updated_at) VALUES (?,?,'user',?,'complete',?,?,?)",
-      [
-        cancelled.user,
-        chat.id,
-        turnQuestion,
-        cancelled.request,
-        started,
-        started,
-      ],
+      [cancelled.user, chat.id, question, cancelled.request, started, started],
     );
     await query(
       "INSERT INTO message (id,chat_id,role,content,status,reply_to_id,created_at,updated_at) VALUES (?,?,'assistant','','running',?,?,?)",
@@ -762,7 +717,7 @@ async function main(options) {
     report(phase, { status: "passed", fixtureSeededInD1: true });
 
     if (options.agent) {
-      phase = options.research ? "real_agent_research" : "real_agent_retry";
+      phase = "real_agent_retry";
       const progressEvents = [];
       const startedAt = Date.now();
       const progress = setInterval(
@@ -780,7 +735,7 @@ async function main(options) {
             `${path}/messages`,
             cookieA,
             {
-              content: turnQuestion,
+              content: question,
               requestId: cancelled.request,
               retry: true,
             },
@@ -837,12 +792,22 @@ async function main(options) {
         result.status === "complete" && result.text.length >= 20,
         "agent_answer_incomplete",
       );
-      let metrics;
-      if (options.research) metrics = researchSummary(result, progressEvents);
-      else {
+      {
         ensure(
           result.evidence?.cohort?.totalProfiles === expected.sourceAccounts,
           "agent_corpus_not_used",
+        );
+        ensure(
+          !result.evidence.sources.some((source) =>
+            ["official", "web"].includes(source.kind),
+          ),
+          "agent_unexpected_external_source",
+        );
+        ensure(
+          !progressEvents.some((event) =>
+            ["public_search", "fetch_public_page"].includes(event.stage),
+          ),
+          "agent_unexpected_external_tool",
         );
         const cohort = result.evidence.cohort;
         ensure(
@@ -851,7 +816,9 @@ async function main(options) {
           "agent_cohort_counts_invalid",
         );
         const cited = new Set(
-          [...result.text.matchAll(/\[(P\d+)\]/g)].map((match) => match[1]),
+          [...result.text.matchAll(/\[([^\]\n]{1,100})\]/g)].flatMap(
+            (match) => match[1].match(/\bP\d+\b/g) ?? [],
+          ),
         );
         const supporting = new Set(
           result.evidence.sources
@@ -864,11 +831,6 @@ async function main(options) {
           supporting.size > 0 && cohort.supportingProfiles === supporting.size,
           "agent_supporting_count_mismatch",
         );
-        metrics = {
-          matched: cohort.matchedProfiles,
-          examined: cohort.examinedProfiles,
-          supporting: cohort.supportingProfiles,
-        };
       }
       const saved = await jsonBody(await api(path, cookieA));
       ensure(
@@ -880,7 +842,9 @@ async function main(options) {
       report(phase, {
         status: "passed",
         characters: result.text.length,
-        ...metrics,
+        matched: result.evidence.cohort.matchedProfiles,
+        examined: result.evidence.cohort.examinedProfiles,
+        supporting: result.evidence.cohort.supportingProfiles,
       });
     }
     phase = "chat_delete";
@@ -923,54 +887,22 @@ async function main(options) {
         environment: options.env,
         realAgent: options.agent,
         storageOnly: options.storageOnly,
-        research: options.research,
       });
   }
 }
 
 async function selfTest() {
   ensure(argumentsFor(["--env", "staging", "--agent"]).agent, "arguments_test");
-  const researchOptions = argumentsFor([
-    "--env",
-    "staging",
-    "--research",
-    "--report",
-    "/tmp/synthetic-report.json",
-  ]);
   ensure(
-    researchOptions.agent && researchOptions.research,
-    "research_arguments_test",
+    argumentsFor([
+      "--env",
+      "staging",
+      "--agent",
+      "--report",
+      "/tmp/report.json",
+    ]).report,
+    "report_arguments_test",
   );
-  const publicResult = {
-    text: "Reviewed public requirements. [W1]",
-    evidence: {
-      sources: [
-        {
-          id: "W1",
-          kind: "official",
-          url: "https://med.stanford.edu/md-admissions.html",
-        },
-      ],
-    },
-  };
-  const publicProgress = [
-    { stage: "public_search" },
-    { stage: "fetch_public_page" },
-  ];
-  ensure(
-    researchSummary(publicResult, publicProgress).officialSources === 1,
-    "research_evidence_test",
-  );
-  let fabricated = false;
-  try {
-    researchSummary(
-      { ...publicResult, evidence: { ...publicResult.evidence, cohort: {} } },
-      publicProgress,
-    );
-  } catch {
-    fabricated = true;
-  }
-  ensure(fabricated, "research_cohort_rejected_test");
   ensure(
     argumentsFor(["--env", "staging", "--storage-only"]).storageOnly,
     "storage_only_arguments_test",
@@ -1033,7 +965,7 @@ try {
   const options = argumentsFor(process.argv.slice(2));
   if (options.help) {
     console.log(
-      "Usage: node scripts/smoke-product.mjs --env staging|production [--storage-only | --agent | --research] [--report NEW_PATH]\n       node scripts/smoke-product.mjs --env staging|production --cleanup PATH\n       node scripts/smoke-product.mjs --self-test\nCreates only synthetic fixtures and cleans them up. --storage-only skips streaming. Default verifies replay without AI. --agent adds one real corpus comparison retry. --research implies --agent and instead verifies Stanford official research. --report requires a real-agent mode and writes only answer/evidence/progress to a new mode-0600 file. Real-agent modes cannot be combined with --storage-only. Requires deployed migrations/endpoints, local auth secrets, and Wrangler credentials. Console output omits tokens and answer content.",
+      "Usage: node scripts/smoke-product.mjs --env staging|production [--storage-only | --agent] [--report NEW_PATH]\n       node scripts/smoke-product.mjs --env staging|production --cleanup PATH\n       node scripts/smoke-product.mjs --self-test\nCreates only synthetic fixtures and cleans them up. --storage-only skips streaming. Default verifies replay without AI. --agent adds one real corpus comparison retry. --report requires a real-agent mode and writes only answer/evidence/progress to a new mode-0600 file. Real-agent modes cannot be combined with --storage-only. Requires deployed migrations/endpoints, local auth secrets, and Wrangler credentials. Console output omits tokens and answer content.",
     );
   } else if (options.selfTest) await selfTest();
   else await main(options);
