@@ -1,8 +1,10 @@
 # Development tooling
 
-Verified on 2026-09-09 (America/Los_Angeles). This repository contains a health-only
-Worker to exercise the development and release workflow. Product implementation
-and applicant data collection are separate future work.
+Verified on 2026-09-09 (America/Los_Angeles). The setup foundation uses React/Vite
+static assets on the existing Cloudflare Worker, with Google login through Better
+Auth and D1 sessions. Full chat, attachments, applicant data collection, and evidence
+analysis remain future product work. This foundation is tracked in
+[OUT-6](https://linear.app/outpredict/issue/OUT-6/configure-frontend-hosting-google-login-and-runtime-prerequisites).
 
 ## Accounts and issue tracking
 
@@ -31,19 +33,26 @@ npm ci
 npm run dev
 npm run lint
 npm run typecheck
+npm test
 npm run build
 npm run deploy:staging
 npm run deploy:production
 ```
 
-`dev` uses local emulated staging bindings. `build` bundles both environments without
-publishing. Label state/schema/ingestion changes `backend-state` and deploy the issue
+`dev` serves the frontend and Worker at `http://localhost:8787` with local staging
+storage and a local `AUTH_URL` override. Copy `.dev.vars.example` to ignored
+`.dev.vars` and supply the staging Google client credentials and a development-only
+auth secret. Apply local auth tables with `npm run db:migrate:local` first. The AI
+binding is remote if later code calls it; the setup page performs no inference.
+`build` builds Vite assets and bundles both environments without publishing.
+Label state/schema/ingestion changes `backend-state` and deploy the issue
 branch to staging before merge. Staging is shared between branches; record the tested
 commit in Linear. Labels do not create environments. `cf-typegen` regenerates `worker-configuration.d.ts` after binding changes.
 Dependencies and the lockfile are pinned. The scoped Sharp override fixes a vulnerable
 transitive Miniflare dependency; remove it once upstream includes the fixed version.
-Clean install, zero-vulnerability npm audit, lint, typecheck, both dry-runs, and local
-HTTP checks passed. GitHub Actions runs install, lint, typecheck, and build for PRs/main.
+GitHub Actions runs install, dependency audit, lint, typecheck, Workers integration
+tests, and build for PRs/main. Tests exercise the real local D1 migration, signed
+sessions, isolation, expiry/revocation, OAuth origins/redirects, and built assets.
 The setup PR passed its first CI run. Main requires the GitHub Actions `checks` status,
 up-to-date branches, a PR, and resolved conversations, including for admins. There is
 no required human review, so an authorized agent can merge after checking the diff.
@@ -85,9 +94,11 @@ checks for the latest commit and verify health after merging.
 - Git, `curl`, and `jq` passed authenticated/HTTPS/JSON checks.
 - `uv` 0.10.8 ran Python 3.12.11; JSON and SQLite checks passed.
 - Interactive browser navigation, clicking, and screenshots work. Manual browser
-  verification is the current workflow; no Playwright dependency or test suite is required.
-- Cloudflare Vectorize, Queues, and Workers AI catalog reads passed. No Outpredict
-  resources or model inference are provisioned for them yet.
+  verification complements the Workers integration tests; Playwright is not required.
+- Cloudflare Vectorize and Queues catalog reads passed; no product resources exist
+  for them yet. Workers AI is bound as `AI`, with `AI_MODEL` set to
+  `@cf/openai/gpt-oss-120b`. An authenticated, bounded model request returned HTTP 200
+  and the expected response. No public inference endpoint is exposed.
 - Initial data collection will be a later one-time Codex pass. OpenAI API access is
   not a prerequisite for that collection; the previously present API credential
   returned 401 and was not repaired or used for inference.
@@ -96,3 +107,70 @@ checks for the latest commit and verify health after merging.
 
 Credentials stay in credential/secret stores and ignored local files. Recheck
 access in a future environment rather than assuming it inherits this machine's login.
+
+## Authentication configuration
+
+Setup checkpoint: separate production and staging-runtime OAuth clients were
+created, with credentials saved to ignored mode-0600 files and Cloudflare secrets.
+Independent auth secrets are preserved in each environment. The original staging
+client whose secret was not saved remains unused. OAuth branding has application,
+privacy, and terms links, and basic-identity login was published for external users.
+The auth migration has been applied to both environments. Staging branch deployment
+`7e731216-177f-4958-9b8c-20ceeb7fec89` successfully completed a real Google browser
+round trip on September 9. Local checks (11 auth tests, lint, typecheck, both builds,
+and zero-vulnerability dependency audit) were independently rechecked. Production
+release verification is still pending; check the linked OUT-6 issue/PR for updates.
+
+Google Cloud project: `outpredict-20260909` (number `930855311603`). Use an explicit
+`--project=outpredict-20260909` in Google CLI commands; the machine's default project
+belongs to another app. No billing account was linked. OAuth branding uses
+**Outpredict**, an external audience, and only basic sign-in identity scopes:
+`openid`, `email`, and `profile`.
+
+| Environment | Application origin | Google redirect URI |
+|---|---|---|
+| Local | `http://localhost:8787` | `http://localhost:8787/api/auth/callback/google` |
+| Staging | `https://outpredict-staging.anywager.workers.dev` | `https://outpredict-staging.anywager.workers.dev/api/auth/callback/google` |
+| Production | `https://outpredict.anywager.workers.dev` | `https://outpredict.anywager.workers.dev/api/auth/callback/google` |
+
+`AUTH_URL` is fixed per environment. Staging and production need separate Google
+clients and independently generated `BETTER_AUTH_SECRET` values; local development
+uses the staging client with its registered localhost callback. Worker secrets are
+`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `BETTER_AUTH_SECRET`. Never put actual
+values in Wrangler configuration, documentation, GitHub, or Linear.
+
+Before deploying code that needs auth tables, run `npm run db:migrate:staging`,
+verify the issue branch in staging, then run `npm run db:migrate:production` before
+merging. Migrations are not executed during requests or automatically by deploy.
+Version preview URLs intentionally disable login: use the stable staging origin
+for OAuth tests. `/api/setup` reports whether login is configured for that origin;
+`/api/me` returns only the identity from a valid server session. Unauthenticated
+requests receive 401; missing configuration receives 503. Auth responses are not
+cached, and state-changing auth requests require the configured Origin header.
+
+## Live search readiness
+
+Live search is **not yet verified**. Cloudflare's experimental native Web Search
+returned `account_disabled` (7078), despite the local OAuth token having
+`websearch.run`. Its CLI has no enable command and no verified self-service
+activation path was found. Cloudflare AI Search is a separate retrieval product.
+
+An Outpredict-only Google public-search service account and API key were prepared
+as a possible fallback. The key is restricted to `generativelanguage.googleapis.com`
+and stored only in ignored `.env.search-setup` (mode 0600). Billing remains disabled.
+Both Gemini 2.5 Flash and Flash-Lite grounded query tests returned HTTP 404 because
+those models are no longer available to new users. No paid fallback was invoked,
+and this credential has not been deployed to the Worker. Free-tier Google services
+must not receive confidential applicant documents or chat context; any future
+use needs a separate, sanitized public-information query.
+
+Actual Cloudflare Markdown conversion was tested with synthetic PDF, DOCX, and
+PNG résumés: all reproduced GPA, MCAT, activities, dates, and planned hours.
+A scanned PDF returned empty content despite a success status; the product must
+detect insufficient extracted text and request page images or a text-based PDF.
+The experimental PDF image-conversion option produced an inaccurate description
+and is not a verified fallback. The selected main model is text-only.
+
+The full build is tracked in OUT-7 (reviewed corpus), OUT-8 (conversations/files),
+OUT-9 (agent/evidence), and OUT-10 (reference interface). These capabilities are not
+part of the foundation release until their own checks and live verification pass.
