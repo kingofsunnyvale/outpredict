@@ -1,21 +1,115 @@
+import { authIsConfigured, createAuth } from "./auth";
+
+function json(data: unknown, status = 200, headers = new Headers()): Response {
+  headers.set("Cache-Control", "no-store");
+  headers.set("X-Content-Type-Options", "nosniff");
+  return Response.json(data, {
+    status,
+    headers,
+  });
+}
+
+const authRoutes = new Map([
+  ["/api/auth/sign-in/social", "POST"],
+  ["/api/auth/callback/google", "GET"],
+  ["/api/auth/get-session", "GET"],
+  ["/api/auth/sign-out", "POST"],
+]);
+
 export default {
-  fetch(request, env): Response {
-    const { pathname } = new URL(request.url);
+  async fetch(request, env): Promise<Response> {
+    const { pathname, origin } = new URL(request.url);
 
     if (request.method === "GET" && pathname === "/healthz") {
-      return Response.json(
-        {
-          service: "outpredict",
-          status: "ok",
-          environment: env.ENVIRONMENT,
-        },
-        { headers: { "Cache-Control": "no-store" } },
-      );
+      return json({
+        service: "outpredict",
+        status: "ok",
+        environment: env.ENVIRONMENT,
+      });
     }
 
-    return new Response("Not found", {
-      status: 404,
-      headers: { "Content-Type": "text/plain; charset=utf-8" },
-    });
+    if (request.method === "GET" && pathname === "/api/setup") {
+      return json({
+        googleSignIn: authIsConfigured(env) && origin === env.AUTH_URL,
+        environment: env.ENVIRONMENT,
+      });
+    }
+
+    if (pathname === "/api/me" || pathname.startsWith("/api/auth/")) {
+      if (!authIsConfigured(env)) {
+        return json({ error: "Google sign-in is not configured yet." }, 503);
+      }
+      if (origin !== env.AUTH_URL) {
+        return json(
+          { error: "Use the configured Outpredict website to sign in." },
+          403,
+        );
+      }
+      try {
+        if (pathname === "/api/me") {
+          if (request.method !== "GET")
+            return json({ error: "Method not allowed" }, 405);
+          const { response: session, headers } = await createAuth(
+            env,
+          ).api.getSession({
+            headers: request.headers,
+            returnHeaders: true,
+          });
+          if (!session)
+            return json({ error: "Sign in to continue." }, 401, headers);
+          // Identity comes exclusively from the verified server session. Never
+          // accept a user ID supplied in a query, header, or request body.
+          return json(
+            {
+              user: {
+                id: session.user.id,
+                name: session.user.name,
+                email: session.user.email,
+              },
+            },
+            200,
+            headers,
+          );
+        }
+        const method = authRoutes.get(pathname);
+        if (!method) return json({ error: "Not found" }, 404);
+        if (request.method !== method)
+          return json({ error: "Method not allowed" }, 405);
+        if (
+          method === "POST" &&
+          request.headers.get("Origin") !== env.AUTH_URL
+        ) {
+          return json({ error: "Untrusted request origin" }, 403);
+        }
+        const response = await createAuth(env).handler(request);
+        const headers = new Headers(response.headers);
+        headers.set("Cache-Control", "no-store");
+        headers.set("X-Content-Type-Options", "nosniff");
+        return new Response(response.body, {
+          status: response.status,
+          headers,
+        });
+      } catch {
+        console.error(
+          JSON.stringify({
+            event: "authentication_request_failed",
+            route: pathname,
+          }),
+        );
+        return json(
+          { error: "Sign-in is temporarily unavailable. Please try again." },
+          503,
+        );
+      }
+    }
+
+    if (
+      pathname === "/api" ||
+      pathname.startsWith("/api/") ||
+      pathname === "/healthz"
+    ) {
+      return json({ error: "Not found" }, 404);
+    }
+    return env.ASSETS.fetch(request);
   },
 } satisfies ExportedHandler<Env>;

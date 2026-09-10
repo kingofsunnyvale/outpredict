@@ -7,13 +7,16 @@
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
   "vars": {
-    "ENVIRONMENT": "production"
+    "ENVIRONMENT": "production",
+    "AUTH_URL": "https://outpredict.anywager.workers.dev",
+    "AI_MODEL": "@cf/openai/gpt-oss-120b"
   },
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "outpredict",
-      "database_id": "adb959a3-48f1-4d38-b074-f3765918fdbb"
+      "database_id": "adb959a3-48f1-4d38-b074-f3765918fdbb",
+      "migrations_dir": "./migrations"
     }
   ],
   "r2_buckets": [
@@ -30,13 +33,16 @@
     "staging": {
       "name": "outpredict-staging",
       "vars": {
-        "ENVIRONMENT": "staging"
+        "ENVIRONMENT": "staging",
+        "AUTH_URL": "https://outpredict-staging.anywager.workers.dev",
+        "AI_MODEL": "@cf/openai/gpt-oss-120b"
       },
       "d1_databases": [
         {
           "binding": "DB",
           "database_name": "outpredict-staging",
-          "database_id": "23df57b3-4ce5-47c0-85a6-e6e016dce87c"
+          "database_id": "23df57b3-4ce5-47c0-85a6-e6e016dce87c",
+          "migrations_dir": "./migrations"
         }
       ],
       "r2_buckets": [
@@ -44,18 +50,32 @@
           "binding": "DATA",
           "bucket_name": "outpredict-staging-data"
         }
-      ]
+      ],
+      "ai": {
+        "binding": "AI",
+        "remote": true
+      },
+      "secrets": {
+        "required": [
+          "GOOGLE_CLIENT_ID",
+          "GOOGLE_CLIENT_SECRET",
+          "BETTER_AUTH_SECRET"
+        ]
+      }
     },
     "production": {
       "name": "outpredict",
       "vars": {
-        "ENVIRONMENT": "production"
+        "ENVIRONMENT": "production",
+        "AUTH_URL": "https://outpredict.anywager.workers.dev",
+        "AI_MODEL": "@cf/openai/gpt-oss-120b"
       },
       "d1_databases": [
         {
           "binding": "DB",
           "database_name": "outpredict",
-          "database_id": "adb959a3-48f1-4d38-b074-f3765918fdbb"
+          "database_id": "adb959a3-48f1-4d38-b074-f3765918fdbb",
+          "migrations_dir": "./migrations"
         }
       ],
       "r2_buckets": [
@@ -63,7 +83,42 @@
           "binding": "DATA",
           "bucket_name": "outpredict-data"
         }
-      ]
+      ],
+      "ai": {
+        "binding": "AI",
+        "remote": true
+      },
+      "secrets": {
+        "required": [
+          "GOOGLE_CLIENT_ID",
+          "GOOGLE_CLIENT_SECRET",
+          "BETTER_AUTH_SECRET"
+        ]
+      }
     }
+  },
+  "assets": {
+    "directory": "./dist/client",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api", "/api/*", "/healthz"]
+  },
+  "build": {
+    "command": "npm run build:client",
+    "watch_dir": ["frontend", "index.html", "vite.config.ts"]
+  },
+  "dev": {
+    "port": 8787
+  },
+  "ai": {
+    "binding": "AI",
+    "remote": true
+  },
+  "secrets": {
+    "required": [
+      "GOOGLE_CLIENT_ID",
+      "GOOGLE_CLIENT_SECRET",
+      "BETTER_AUTH_SECRET"
+    ]
   }
 }

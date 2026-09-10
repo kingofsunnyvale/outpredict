@@ -1,0 +1,5 @@
+# Copy to .dev.vars for local-only credentials. Never commit real values.
+# The dev command fixes AUTH_URL to http://localhost:8787.
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+BETTER_AUTH_SECRET=
