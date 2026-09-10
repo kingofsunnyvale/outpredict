@@ -1,0 +1,69 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "outpredict",
+  "account_id": "8b1ada8b10e9e8e5664ec10bd9d3c370",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-09",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "vars": {
+    "ENVIRONMENT": "production"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "outpredict",
+      "database_id": "adb959a3-48f1-4d38-b074-f3765918fdbb"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "DATA",
+      "bucket_name": "outpredict-data"
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "env": {
+    "staging": {
+      "name": "outpredict-staging",
+      "vars": {
+        "ENVIRONMENT": "staging"
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "outpredict-staging",
+          "database_id": "23df57b3-4ce5-47c0-85a6-e6e016dce87c"
+        }
+      ],
+      "r2_buckets": [
+        {
+          "binding": "DATA",
+          "bucket_name": "outpredict-staging-data"
+        }
+      ]
+    },
+    "production": {
+      "name": "outpredict",
+      "vars": {
+        "ENVIRONMENT": "production"
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "outpredict",
+          "database_id": "adb959a3-48f1-4d38-b074-f3765918fdbb"
+        }
+      ],
+      "r2_buckets": [
+        {
+          "binding": "DATA",
+          "bucket_name": "outpredict-data"
+        }
+      ]
+    }
+  }
+}
