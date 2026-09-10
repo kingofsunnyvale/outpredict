@@ -1,5 +1,5 @@
 import { env } from "cloudflare:test";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import corpus from "../data/corpus.json";
 import {
   type AgentEvent,
@@ -23,7 +23,9 @@ import type { Evidence } from "../src/product-types";
 function stream(events: unknown[], done = true): ReadableStream<Uint8Array> {
   const wire =
     events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("") +
-    (done ? "data: [DONE]\n\n" : "");
+    (done
+      ? 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+      : "");
   const bytes = new TextEncoder().encode(wire);
   return new ReadableStream({
     start(controller) {
@@ -35,17 +37,43 @@ function stream(events: unknown[], done = true): ReadableStream<Uint8Array> {
   });
 }
 
-function scriptedAI(replies: unknown[], requests: unknown[]): Ai {
-  const ai: Ai = Object.create(env.AI);
-  Object.defineProperty(ai, "run", {
-    value: async (_model: unknown, request: unknown) => {
-      requests.push(structuredClone(request));
+function scriptedOpenAI(
+  replies: unknown[],
+  requests: unknown[],
+): { OPENAI_API_KEY: string } {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string, init: RequestInit) => {
+      expect(url).toBe("https://api.openai.com/v1/chat/completions");
+      const request = JSON.parse(String(init.body));
+      expect(request.store).toBe(false);
+      expect(init.redirect).toBe("manual");
+      requests.push(request);
       if (!replies.length) throw new Error("Unexpected model request");
-      return replies.shift();
-    },
-  });
-  return ai;
+      const reply = replies.shift();
+      if (reply instanceof ReadableStream)
+        return new Response(reply, {
+          headers: { "content-type": "text/event-stream" },
+        });
+      const parsed = parseModelReply(reply);
+      return Response.json({
+        choices: [
+          {
+            finish_reason: parsed.calls.length ? "tool_calls" : "stop",
+            message: {
+              role: "assistant",
+              content: parsed.content || null,
+              ...(parsed.calls.length ? { tool_calls: parsed.calls } : {}),
+            },
+          },
+        ],
+      });
+    }),
+  );
+  return { OPENAI_API_KEY: "synthetic-openai-test-key" };
 }
+
+afterEach(() => vi.unstubAllGlobals());
 
 describe("model evidence and stream boundaries", () => {
   it("never presents a conditional next-cycle offer as a current acceptance", () => {
@@ -193,7 +221,7 @@ describe("model evidence and stream boundaries", () => {
         JSON.stringify({ choices: [{ finish_reason: "length" }] }),
       ).truncated,
     ).toBe(true);
-    expect(parseStreamEvent("[DONE]").done).toBe(true);
+    expect(parseStreamEvent("[DONE]").done).toBe(false);
     expect(() => parseStreamEvent('{"error":"provider error"}')).toThrow();
     expect(
       parseModelReply({
@@ -314,7 +342,7 @@ describe("model evidence and stream boundaries", () => {
     const result = await runAgent({
       env: {
         ...env,
-        AI: scriptedAI(
+        ...scriptedOpenAI(
           [
             { choices: [{ message: { content: "READY" } }] },
             stream([
@@ -350,7 +378,7 @@ describe("model evidence and stream boundaries", () => {
     const result = await runAgent({
       env: {
         ...env,
-        AI: scriptedAI(
+        ...scriptedOpenAI(
           [
             {
               choices: [
@@ -453,7 +481,7 @@ describe("model evidence and stream boundaries", () => {
     const result = await runAgent({
       env: {
         ...env,
-        AI: scriptedAI(
+        ...scriptedOpenAI(
           [
             cohortCall("reddit"),
             cohortCall("sdn"),
@@ -536,7 +564,7 @@ describe("model evidence and stream boundaries", () => {
     const result = await runAgent({
       env: {
         ...env,
-        AI: scriptedAI(
+        ...scriptedOpenAI(
           [
             { choices: [{ message: { content: "READY" } }] },
             { choices: [{ message: { content: "Private draft to review." } }] },
@@ -634,7 +662,7 @@ describe("model evidence and stream boundaries", () => {
     const result = await runAgent({
       env: {
         ...env,
-        AI: scriptedAI(
+        ...scriptedOpenAI(
           [
             { choices: [{ message: { content: "READY" } }] },
             stream([
@@ -674,99 +702,98 @@ describe("model evidence and stream boundaries", () => {
 
   it("exposes only corpus and calculation tools and never fetches user URLs or legacy outside sources", async () => {
     const requests: unknown[] = [];
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockImplementation(async () => {
-        throw new Error("No outside request may run");
-      });
-    try {
-      const result = await runAgent({
-        env: {
-          ...env,
-          AI: scriptedAI(
-            [
+
+    const result = await runAgent({
+      env: {
+        ...env,
+        ...scriptedOpenAI(
+          [
+            {
+              choices: [
+                {
+                  message: {
+                    tool_calls: [
+                      {
+                        id: "removed",
+                        type: "function",
+                        function: {
+                          name: "public_search",
+                          arguments: '{"institution":"Stanford"}',
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            },
+            { choices: [{ message: { content: "READY" } }] },
+            stream([
               {
                 choices: [
                   {
-                    message: {
-                      tool_calls: [
-                        {
-                          id: "removed",
-                          type: "function",
-                          function: {
-                            name: "public_search",
-                            arguments: '{"institution":"Stanford"}',
-                          },
-                        },
-                      ],
+                    delta: {
+                      content:
+                        "The student corpus cannot verify current school requirements.",
                     },
                   },
                 ],
               },
-              { choices: [{ message: { content: "READY" } }] },
-              stream([
-                {
-                  choices: [
-                    {
-                      delta: {
-                        content:
-                          "The student corpus cannot verify current school requirements.",
-                      },
-                    },
-                  ],
-                },
-              ]),
+            ]),
+          ],
+          requests,
+        ),
+      },
+      messages: [
+        {
+          role: "assistant",
+          content: "OBSOLETE_POLICY_ONLY [W1]",
+          evidence: {
+            sources: [
+              {
+                id: "W1",
+                kind: "official",
+                title: "Old outside policy",
+                url: "https://example.edu/policy",
+                excerpt: "OBSOLETE_POLICY_ONLY",
+              },
             ],
-            requests,
-          ),
+          },
         },
-        messages: [
-          {
-            role: "assistant",
-            content: "OBSOLETE_POLICY_ONLY [W1]",
-            evidence: {
-              sources: [
-                {
-                  id: "W1",
-                  kind: "official",
-                  title: "Old outside policy",
-                  url: "https://example.edu/policy",
-                  excerpt: "OBSOLETE_POLICY_ONLY",
-                },
-              ],
-            },
-          },
-          {
-            role: "user",
-            content:
-              "What are the current requirements at https://example.edu/policy?",
-          },
-        ],
-        onEvent: async () => {},
-      });
-      const first = requests[0] as {
-        tools: Array<{ function: { name: string } }>;
-      };
-      expect(first.tools.map((tool) => tool.function.name)).toEqual([
-        "cohort_search",
-        "profile_inspect",
-        "weekly_time_budget",
-        "calculate",
-      ]);
-      expect(fetchMock).not.toHaveBeenCalled();
-      expect(JSON.stringify(requests)).not.toContain("OBSOLETE_POLICY_ONLY");
-      expect(result.evidence.sources).toEqual([]);
-      expect(result.content).toContain("cannot verify current");
-    } finally {
-      fetchMock.mockRestore();
-    }
+        {
+          role: "user",
+          content:
+            "What are the current requirements at https://example.edu/policy?",
+        },
+      ],
+      onEvent: async () => {},
+    });
+    const first = requests[0] as {
+      tools: Array<{ function: { name: string } }>;
+    };
+    expect(first.tools.map((tool) => tool.function.name)).toEqual([
+      "cohort_search",
+      "profile_inspect",
+      "weekly_time_budget",
+      "calculate",
+    ]);
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(3);
+    expect(
+      vi
+        .mocked(fetch)
+        .mock.calls.every(
+          ([url]) => url === "https://api.openai.com/v1/chat/completions",
+        ),
+    ).toBe(true);
+    expect(JSON.stringify(requests)).not.toContain("OBSOLETE_POLICY_ONLY");
+    expect(result.evidence.sources).toEqual([]);
+    expect(result.content).toContain("cannot verify current");
   });
 
   it("preserves partial answers on provider interruption and obeys lease cancellation", async () => {
     const partial = runAgent({
       env: {
         ...env,
-        AI: scriptedAI(
+        ...scriptedOpenAI(
           [
             { choices: [{ message: { content: "READY" } }] },
             stream(
@@ -798,16 +825,16 @@ describe("model evidence and stream boundaries", () => {
 
   it("consumes a provider rejection when cancellation happens before the wait starts", async () => {
     const abort = new AbortController();
-    const ai: Ai = Object.create(env.AI);
-    Object.defineProperty(ai, "run", {
-      value: async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
         abort.abort();
         throw new Error("Provider rejected after cancellation");
-      },
-    });
+      }),
+    );
     await expect(
       runAgent({
-        env: { ...env, AI: ai },
+        env: { ...env, OPENAI_API_KEY: "synthetic-openai-test-key" },
         signal: abort.signal,
         messages: [{ role: "user", content: "Help me write." }],
         onEvent: async () => {},

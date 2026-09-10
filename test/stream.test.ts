@@ -3,11 +3,13 @@ import {
   env,
   waitOnExecutionContext,
 } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createChat, getChat } from "../src/chat-store";
 import { handleChatStream } from "../src/chat-stream";
 
 const origin = "https://outpredict-staging.anywager.workers.dev";
+
+afterEach(() => vi.unstubAllGlobals());
 
 async function fixture(replies: unknown[]) {
   const id = crypto.randomUUID();
@@ -18,16 +20,28 @@ async function fixture(replies: unknown[]) {
     .bind(id, user.name, user.email, Date.now(), Date.now())
     .run();
   const chat = await createChat(env, user.id);
-  const ai: Ai = Object.create(env.AI);
   let calls = 0;
-  Object.defineProperty(ai, "run", {
-    value: async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string, init: RequestInit) => {
+      expect(url).toBe("https://api.openai.com/v1/chat/completions");
+      expect(JSON.parse(String(init.body)).store).toBe(false);
       calls++;
       if (!replies.length) throw new Error("Provider unavailable");
-      return replies.shift();
-    },
-  });
-  return { user, chat, bindings: { ...env, AI: ai }, calls: () => calls };
+      const reply = replies.shift();
+      return reply instanceof ReadableStream
+        ? new Response(reply, {
+            headers: { "content-type": "text/event-stream" },
+          })
+        : Response.json(reply);
+    }),
+  );
+  return {
+    user,
+    chat,
+    bindings: { ...env, OPENAI_API_KEY: "synthetic-openai-test-key" },
+    calls: () => calls,
+  };
 }
 
 function answer(text: string) {
@@ -35,7 +49,7 @@ function answer(text: string) {
     start(controller) {
       controller.enqueue(
         new TextEncoder().encode(
-          `data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\ndata: [DONE]\n\n`,
+          `data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\ndata: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n`,
         ),
       );
       controller.close();
@@ -54,7 +68,7 @@ function request(chatId: string, body: unknown) {
 describe("persisted streaming boundary", () => {
   it("streams and persists one answer, replays a completed retry without another inference", async () => {
     const item = await fixture([
-      { choices: [{ message: { content: "READY" } }] },
+      { choices: [{ finish_reason: "stop", message: { content: "READY" } }] },
       answer(
         "A useful starting point: describe your role and what you learned.",
       ),
@@ -81,6 +95,7 @@ describe("persisted streaming boundary", () => {
     expect(saved.messages[1]?.content).toContain("what you learned");
     expect(saved.chat.generationId).toBeNull();
     const calls = item.calls();
+    expect(calls).toBe(2);
     const retryContext = createExecutionContext();
     const retry = await handleChatStream(
       request(item.chat.id, body),

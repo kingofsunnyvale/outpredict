@@ -1,11 +1,13 @@
 # Development and release tooling
 
 Outpredict uses React/Vite, a Cloudflare Worker, Better Auth Google sessions, D1,
-private R2, and Workers AI. Google authentication, the reviewed corpus, and private
+private R2, OpenAI GPT-5.6 Sol for advice, and Workers AI for file extraction.
+Google authentication, the reviewed corpus, and private
 conversation/file storage are merged and verified in staging and production.
 OUT-9 adds verified streamed advice grounded in the scraped student corpus. The
 product scope excludes outside web search and official-policy retrieval. The
-OUT-10 interface is undergoing its final deployed browser verification.
+OUT-10 interface is deployed in both environments. Final domain acceptance is
+tracked separately in OUT-13.
 
 Detailed contracts and limitations live in [DATA.md](DATA.md),
 [STORAGE.md](STORAGE.md), and [RUNTIME.md](RUNTIME.md).
@@ -30,8 +32,10 @@ Detailed contracts and limitations live in [DATA.md](DATA.md),
 The product build is tracked in OUT-7 (corpus), OUT-8 (conversations/files),
 OUT-9 (agent/evidence), and OUT-10 (interface), following the OUT-5/OUT-6 setup.
 [OUT-11](https://linear.app/outpredict/issue/OUT-11/expand-the-reviewed-student-forum-corpus-across-accessible-public)
-queues expanded public-forum collection for a later subagent handoff after release.
-It has no numerical target or artificial record cap; collection has not started.
+tracks the active public-forum collection and reviewed-corpus expansion. It has
+no numerical target or artificial record cap. Raw collection is kept separate
+from reviewed/queryable records; current progress and access boundaries are in
+the issue. OUT-12 tracks the Sol migration and OUT-13 the final outpredict.app release.
 
 ## Local development and checks
 
@@ -56,7 +60,8 @@ Copy `.dev.vars.example` to ignored `.dev.vars`, supplying the staging Google
 client and a development-only auth secret. `dev` uses `http://localhost:8787`,
 local staging D1/R2, and a local `AUTH_URL` override. Import the reviewed corpus
 locally with `node scripts/import-corpus.mjs --env staging` when testing retrieval.
-AI is remote: development chat/document calls can invoke Cloudflare.
+Advice calls use the server-only `OPENAI_API_KEY`; provide it in ignored
+`.dev.vars` for local generation. Document conversion still uses remote Cloudflare AI.
 
 `build` bundles both environments without publishing; `cf-typegen` regenerates
 binding types. CI runs installation, dependency audit, lint, typecheck, corpus and
@@ -114,10 +119,18 @@ sign-in and sign-out flows when verifying the final OUT-10 interface.
 | Staging | `https://outpredict-staging.anywager.workers.dev` | `https://outpredict-staging.anywager.workers.dev/api/auth/callback/google` |
 | Production | `https://outpredict.anywager.workers.dev` | `https://outpredict.anywager.workers.dev/api/auth/callback/google` |
 
-Worker secrets are `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and
-`BETTER_AUTH_SECRET`. Local copies are ignored mode-0600 `.env.auth-staging.json`
+Worker secrets are `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`,
+`BETTER_AUTH_SECRET`, and `OPENAI_API_KEY`. Auth copies are ignored mode-0600 `.env.auth-staging.json`
 and `.env.auth-production.json`; development uses `.dev.vars`. Credentials belong
 in secret stores or ignored private files, never Git, output, Linear, or PRs.
+
+The restricted OpenAI key belongs to the Outpredict project. Its permissions are
+model listing (read) and Chat Completions (request). The ignored mode-0600
+`.env.openai-worker.json` contains only the Worker key; `.env.openai-runtime.json`
+also records the project ID. A coordinated deployment can supply the private
+Worker file with `--secrets-file`; Wrangler preserves other existing secrets.
+Install the production secret before merging code that requires it. Never pass
+the key as a command argument or include it in a deployment report.
 
 `AUTH_URL` is fixed per environment. `/api/setup` reports readiness; `/api/me` uses
 the verified server session. Private APIs enforce ownership, disable caching, and
@@ -146,10 +159,12 @@ omit the option when those matching objects exist. Preserve source artifacts in
 private storage, not a `/tmp` directory as a durable dependency. Verify staging
 before an explicit production import. See DATA.md for scope and limitations.
 
-The configured model is **`@cf/zai-org/glm-5.3-flash`**. Sampled live checks
-verified corpus comparisons, conditional time-budget arithmetic, attachment
-citations, and sentence-format repair; see RUNTIME.md for the evidence and
-limitations. OUT-9 passed real staging and production runtime verification.
+The configured advice model is exactly **`gpt-5.6-sol`**. OUT-12 replaces the
+previous GLM runtime, keeping Cloudflare file conversion. Actual OpenAI API access,
+function calls, native SSE, résumé/calendar facts, follow-up context, count and
+publication semantics, and the corpus-only policy boundary passed sampled checks.
+See RUNTIME.md for the evidence and limitations. OUT-9 records the preceding
+staging/production runtime verification; OUT-12 records the model migration release.
 Private reasoning is not exposed; interrupted answers retain partial text and
 retry state. Up to two cohort searches permit one refinement. The application
 finalizes supporting counts after citations are known and reports the actual
@@ -164,9 +179,9 @@ keep unknown outcomes distinct, and avoid filling missing evidence from general
 model knowledge. Source links identify the forum material behind retrieved facts;
 they are not an additional live research service.
 
-Expanded collection is tracked in OUT-11. The current SDN inventory enumerates
-3,239 threads and 2,882 source accounts, not qualifying imported records. The later
-workstream should collect as much accessible public forum material as practical,
+Expanded collection is running under OUT-11. Its resumable inventory and progress
+are recorded in the issue; inventory entries are not qualifying imported records.
+The workstream collects as much accessible public forum material as practical,
 preserve raw reviewed source coverage separately from the queryable corpus, and
 report exact visited/parsed/reviewed/imported/excluded counts and missingness.
 Current quality and explicit-outcome requirements must not be silently relaxed.
@@ -212,4 +227,5 @@ interface deployment and browser evidence is recorded with OUT-10.
 | OUT-7 | [PR #4](https://github.com/kingofsunnyvale/outpredict/pull/4), merge `635de31940acda38a6cb9c0d9331a3debb73b2c8`; 58 reviewed accounts and private source artifacts verified in both environments. |
 | OUT-8 | [PR #5](https://github.com/kingofsunnyvale/outpredict/pull/5), merge `c44b89be46dd4f21d0028ff86aa532ee34bd3ec6`; private storage APIs and synthetic cleanup verified in both environments. |
 | OUT-9 | [PR #6](https://github.com/kingofsunnyvale/outpredict/pull/6), merge `420a509a2a2592df188af482825a7758288302c9`; 72 tests and required checks pass. Staging branch `58c3f3a` / version `5dcccc68-a195-42c2-be33-0dbca3c9a97f` passed real-agent and private-storage smoke. Automatic main deployments passed: staging `55e674ec-ea98-4041-afcd-09b57483ad29`, production `fe0d16b6-e58e-4607-8518-958187f5c5fc`. Production smoke and manual answer review passed: 58 matching, 12 retrieved, two cited supporting accounts, saved evidence/calculations consistent, exact synthetic cleanup complete. |
-| OUT-10 | **Pending.** Final UI commit/PR/CI, deployment IDs, desktop/mobile flows, and complete product verification remain required. |
+| OUT-10 | [PR #7](https://github.com/kingofsunnyvale/outpredict/pull/7), merge `46e5765e494a1c4a3377861141adb5f5afd71e98`; 72 tests and required checks pass. Exact branch `ad6ab18` passed staging at `b62b91f1-b6d5-4cf9-a5c3-bf73842015ca`: Google draft, PDF plan/follow-up, profile/evidence inspection, saved history and mobile. Automatic main staging `797045dd-d1f9-42a3-b461-3276525eda52` and production `a578b61e-4afc-42cd-bbbe-18431e39dfdb` passed. Production Google draft and saved conversation confirmed. Model answer-quality corrections and final domain flows continue in OUT-12/13. |
+| OUT-12 | OpenAI migration: 90 tests, lint, typecheck and both builds pass; exact-model API and sampled synthetic answer checks pass. Branch staging and production release evidence will be recorded after deployment. |
