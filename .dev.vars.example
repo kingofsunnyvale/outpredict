@@ -3,3 +3,6 @@
 GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
 BETTER_AUTH_SECRET=
+
+# Advice runtime only; Cloudflare Workers AI still extracts supported files.
+OPENAI_API_KEY=

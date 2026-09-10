@@ -2532,11 +2532,13 @@ export function ProductApp() {
             </p>
             <h3>The corpus and your own inputs.</h3>
             <p>
-              Outpredict uses Cloudflare Workers AI to process questions and
-              documents, compare scraped applicant profiles, and compute
-              summaries. Your messages and optional files supply your personal
-              context. The evidence panel shows the profiles, calculations, and
-              documents behind each answer.
+              Outpredict sends your conversation, relevant extracted file text,
+              and selected corpus evidence to OpenAI to draft an answer.
+              Cloudflare hosts your files and extracts their text. The evidence
+              panel shows the profiles, calculations, and documents behind each
+              answer. OpenAI may retain content for abuse monitoring for up to
+              30 days, with legal and safety exceptions; Outpredict does not opt
+              in to model-training data sharing.
             </p>
             <h3>Free, with sensible limits.</h3>
             <p>

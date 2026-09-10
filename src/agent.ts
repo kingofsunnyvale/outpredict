@@ -9,6 +9,13 @@ import {
   inspectProfile,
   searchCohort,
 } from "./cohort";
+import {
+  type ModelMessage,
+  type ModelTool,
+  type ModelToolCall,
+  type OpenAIEnvironment,
+  runOpenAI,
+} from "./openai-transport";
 import { type Evidence, ProductError, type Source } from "./product-types";
 
 export type AgentEvent =
@@ -17,7 +24,7 @@ export type AgentEvent =
   | { type: "evidence"; evidence: Evidence };
 
 export type AgentOptions = {
-  env: Pick<Env, "DB" | "AI" | "AI_MODEL">;
+  env: Pick<Env, "DB" | "AI_MODEL"> & OpenAIEnvironment;
   messages: Array<{
     role: "user" | "assistant";
     content: string;
@@ -53,6 +60,7 @@ Evidence and interpretation rules:
 - Each factual source claim needs its exact source citation, e.g. [P1], [A1], [C1], next to the claim. Use ONLY source IDs supplied by tools/documents. Cite individual IDs separately. Cite the cohort calculation source for computed summaries.
 - Supporting applicants means distinct retrieved source accounts whose profile citations actually appear in this answer. It NEVER means the numeric-summary population, a statistic's n, the matching population, or all retrieved profiles. The application computes supporting count after the answer. Leave the four cohort count labels and their numbers to the application's Evidence counts receipt/panel; explain profile differences and individual statistics without inventing a count summary.
 - A missing hour value means hours are unreported, not that the activity itself is unreported. Publications and other narrative-only categories are described by their exact reported text, not hours. If the publication text reports none but mentions a thesis/poster or future manuscripts, preserve that distinction; do not call publications unreported.
+- Say one applicant has higher/lower or more/fewer hours than another only when both report numeric values for the same category, with comparable cycle/timing and precision that supports that ordering. If either value is missing or unquantified, or uncertain ranges overlap, state that the numeric comparison is unavailable and preserve each applicant's reported activity narrative.
 - Applicant outcomes are school-specific. A rejection at one school does not mean no acceptance elsewhere. Accepted: No is UNKNOWN unless an explicit decision is present. Missing hours are not zero. Planned hours are not completed. Shadowing is separate from clinical service.
 - The corpus is a small self-selected convenience sample. It cannot establish typical/national profiles, causal effects, competitiveness, rankings, or personal admission odds. Never say a metric caused or did not cause an outcome. Do not call an applicant competitive, weak, strong, or an outlier based on this sample.
 - Medians describe the reported sample ONLY. They are not admissions targets, thresholds, benchmarks, or recommended hours. Never recommend increasing hours to hit a median or copy a successful applicant. Explain relevant missingness and sample size where the comparison is used.
@@ -69,6 +77,7 @@ const PLAN_REVIEW_INSTRUCTIONS = `Revise the private draft below into the final 
 - No activity is sufficient, enough, weak, strong, or a gap solely because of its hour total. Do not infer that an unreported activity is absent. Ask when responsibilities or experience are unknown.
 - Do not write a cohort count list or equate supporting with numericSummaryPopulation, matchingApplicants, or any statistic's n. The application appends accurate Evidence counts after final citations are known; for sentence-limited answers the evidence panel supplies counts. If the draft conflates these, remove its count paragraph and let the application report them.
 - Preserve narrative activity reporting. Publications are not hours: read reportedText and reportingStatus. A source explicitly reporting no publications is not unreported merely because a database hour field was null. Distinguish completed publications from theses, posters, and planned manuscripts.
+- Check every higher/lower or more/fewer hours comparison: both same-category numeric values must be reported, have comparable cycle/timing, and have precision that supports ordering. If either value is missing/unquantified or uncertain ranges overlap, remove the ordering, say the numeric comparison is unavailable, and preserve the reported activity narrative.
 - Corpus medians are descriptions, never goals or reasons to prioritize an activity. An excluded numeric value is not necessarily unreported. Do not infer causes of applicant outcomes or rank the importance of school lists, hours, academics, or essays from the outcome spread.
 - Keep completed hours separate from future/planned hours. For a weekly budget, copy the tool's verifiedStatement verbatim with its citation; it is already written in plain English. Do not add ratios, percentages, half/twice metaphors, additional annualized totals, or uncomputed estimates. A 52-week calculation does NOT show that a plan fits an earlier calendar deadline. Use calendarChecks when supplied: they override any duration-based claim that a plan fits by a month. Never assure that a plan fits a deadline without a matching computed calendar check. Keep calendar timing separate until the submission date is clear.
 - Check every date against today's date. Never schedule action in the past. Entry year and application submission year differ. If the user's timing conflicts with their document, keep the immediate advice date-neutral and ask their submission month/year before giving a seasonal plan. Use the submission and entry dates the student actually supplied. For example, if the student says submission in June 2027 for 2028 entry, a document stating 2027 entry conflicts with that stated plan. Do not infer an application calendar from background knowledge. Do not describe mid-year dates earlier than today as upcoming or "now".
@@ -80,7 +89,7 @@ const tool = (
   description: string,
   properties: Record<string, unknown>,
   required: string[] = [],
-): ChatCompletionFunctionTool => ({
+): ModelTool => ({
   type: "function",
   function: {
     name,
@@ -94,7 +103,7 @@ const tool = (
   },
 });
 
-const TOOLS: ChatCompletionFunctionTool[] = [
+const TOOLS: ModelTool[] = [
   tool(
     "cohort_search",
     "Retrieve a bounded sample of real applicants and exact descriptive statistics. At most two cohort searches per answer, allowing one refinement. The displayed cohort counts always describe the latest search; earlier sources remain citable. Omit unknown personal metrics. If broad comparison, use no filters. All counts are distinct source accounts, not school rows.",
@@ -171,7 +180,7 @@ function record(value: unknown): Record<string, unknown> | undefined {
 
 type ModelReply = {
   content: string;
-  calls: ChatCompletionMessageFunctionToolCall[];
+  calls: ModelToolCall[];
 };
 
 export function parseModelReply(value: unknown): ModelReply {
@@ -182,7 +191,7 @@ export function parseModelReply(value: unknown): ModelReply {
     : undefined;
   const message = record(choice?.message);
   const rawCalls = message?.tool_calls ?? body?.tool_calls;
-  const calls: ChatCompletionMessageFunctionToolCall[] = [];
+  const calls: ModelToolCall[] = [];
   if (Array.isArray(rawCalls)) {
     for (const raw of rawCalls.slice(0, 6)) {
       const call = record(raw);
@@ -573,7 +582,7 @@ export function parseStreamEvent(data: string): {
   truncated: boolean;
 } {
   if (data.trim() === "[DONE]")
-    return { text: "", done: true, truncated: false };
+    return { text: "", done: false, truncated: false };
   let parsed: unknown;
   try {
     parsed = JSON.parse(data);
@@ -587,6 +596,14 @@ export function parseStreamEvent(data: string): {
     ? record(body.choices[0])
     : undefined;
   const delta = record(choice?.delta);
+  if (
+    choice?.finish_reason &&
+    !["stop", "length"].includes(String(choice.finish_reason))
+  )
+    throw new ProductError(
+      503,
+      "The answer provider could not finish. Please retry.",
+    );
   return {
     text:
       typeof delta?.content === "string"
@@ -744,7 +761,7 @@ export async function runAgent(
     evidence.sources.push(source);
     return source;
   };
-  const messages: ChatCompletionMessageParam[] = [
+  const messages: ModelMessage[] = [
     {
       role: "system",
       content: `${ADVISOR_INSTRUCTIONS}\nToday is ${new Date().toISOString().slice(0, 10)}.`,
@@ -761,7 +778,7 @@ export async function runAgent(
         ),
     );
   let remaining = 100_000;
-  const history: ChatCompletionMessageParam[] = [];
+  const history: ModelMessage[] = [];
   for (const message of [...recent].reverse()) {
     if (remaining <= 0) break;
     const text = message.content.slice(0, Math.min(16_000, remaining));
@@ -800,9 +817,7 @@ export async function runAgent(
       );
   }
 
-  const execute = async (
-    call: ChatCompletionMessageFunctionToolCall,
-  ): Promise<unknown> => {
+  const execute = async (call: ModelToolCall): Promise<unknown> => {
     await check();
     if (call.function.arguments.length > 5000)
       throw new ProductError(400, "Tool input is too large.");
@@ -997,18 +1012,17 @@ export async function runAgent(
     let callsUsed = 0;
     for (let round = 0; round < 4 && callsUsed < 7; round++) {
       await check();
-      const response = await bounded(
-        env.AI.run(env.AI_MODEL, {
+      const response = await runOpenAI(
+        env,
+        {
           messages,
           tools: TOOLS,
           tool_choice: "auto",
           parallel_tool_calls: false,
-          max_tokens: 1400,
-          temperature: 0.15,
-          reasoning_effort: "low",
-        }),
-        AbortSignal.any([signal, AbortSignal.timeout(40_000)]),
-        options.checkpoint,
+          max_completion_tokens: 1400,
+          reasoning_effort: "none",
+        },
+        { signal, checkpoint: options.checkpoint },
       );
       const reply = parseModelReply(response);
       if (reply.calls.length === 0) break;
@@ -1065,15 +1079,14 @@ export async function runAgent(
         title: "Checking the plan against your evidence",
       });
       const draft = parseModelReply(
-        await bounded(
-          env.AI.run(env.AI_MODEL, {
+        await runOpenAI(
+          env,
+          {
             messages,
-            max_tokens: 2200,
-            temperature: 0.2,
+            max_completion_tokens: 2200,
             reasoning_effort: "low",
-          }),
-          AbortSignal.any([signal, AbortSignal.timeout(40_000)]),
-          options.checkpoint,
+          },
+          { signal, checkpoint: options.checkpoint },
         ),
       ).content;
       if (draft.trim()) {
@@ -1090,17 +1103,17 @@ export async function runAgent(
       stage: "answering",
       title: "Writing your answer",
     });
-    const stream = await bounded(
-      env.AI.run(env.AI_MODEL, {
+    const stream = await runOpenAI(
+      env,
+      {
         messages,
         stream: true,
-        max_tokens: options.documents?.length || evidence.cohort ? 4500 : 3500,
-        temperature: 0.25,
+        max_completion_tokens:
+          options.documents?.length || evidence.cohort ? 4500 : 3500,
         reasoning_effort:
           options.documents?.length || evidence.cohort ? "high" : "low",
-      }),
-      AbortSignal.any([signal, AbortSignal.timeout(40_000)]),
-      options.checkpoint,
+      },
+      { signal, checkpoint: options.checkpoint },
     );
     const reader = stream.getReader();
     const decoder = new TextDecoder();
@@ -1176,19 +1189,18 @@ export async function runAgent(
           title: "Checking the requested format",
         });
         const repaired = parseModelReply(
-          await bounded(
-            env.AI.run(env.AI_MODEL, {
+          await runOpenAI(
+            env,
+            {
               messages: sentenceRepairMessages(
                 latestRequest,
                 content,
                 sentenceCount,
               ),
-              max_tokens: 1600,
-              temperature: 0.1,
+              max_completion_tokens: 1600,
               reasoning_effort: "low",
-            }),
-            AbortSignal.any([signal, AbortSignal.timeout(40_000)]),
-            options.checkpoint,
+            },
+            { signal, checkpoint: options.checkpoint },
           ),
         ).content;
         if (!checkSentenceConstraint(latestRequest, repaired)?.valid) {

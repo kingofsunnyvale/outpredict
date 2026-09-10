@@ -8,6 +8,7 @@ export default defineConfig({
       remoteBindings: false,
       miniflare: {
         bindings: {
+          OPENAI_API_KEY: "synthetic-openai-test-key",
           TEST_MIGRATIONS: await readD1Migrations("./migrations"),
           GOOGLE_CLIENT_ID: "test-client.apps.googleusercontent.com",
           GOOGLE_CLIENT_SECRET: "test-client-secret",
