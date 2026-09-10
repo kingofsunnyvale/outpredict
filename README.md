@@ -1,2 +1,2 @@
 # outpredict
-Data driven college admissions
+Data driven med-school advice
