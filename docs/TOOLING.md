@@ -1,131 +1,112 @@
-# Development tooling
+# Development and release tooling
 
-Verified on 2026-09-09 (America/Los_Angeles). The setup foundation uses React/Vite
-static assets on the existing Cloudflare Worker, with Google login through Better
-Auth and D1 sessions. Full chat, attachments, applicant data collection, and evidence
-analysis remain future product work. This foundation is tracked in
-[OUT-6](https://linear.app/outpredict/issue/OUT-6/configure-frontend-hosting-google-login-and-runtime-prerequisites).
+Outpredict uses React/Vite, a Cloudflare Worker, Better Auth Google sessions, D1,
+private R2, and Workers AI. Google authentication, the reviewed corpus, and private
+conversation/file storage are merged and verified in staging and production.
+OUT-9 adds verified streamed advice grounded in the scraped student corpus. The
+product scope excludes outside web search and official-policy retrieval. The
+OUT-10 interface is undergoing its final deployed browser verification.
 
-## Accounts and issue tracking
+Detailed contracts and limitations live in [DATA.md](DATA.md),
+[STORAGE.md](STORAGE.md), and [RUNTIME.md](RUNTIME.md).
 
-- GitHub: `kingofsunnyvale/outpredict`, default branch `main`; `gh` is authenticated
-  as `kingofsunnyvale` with repository admin access and the `workflow` OAuth scope.
-- Linear workspace: [outpredict](https://linear.app/outpredict). Team **Outpredict**
-  uses **OUT**; project [Outpredict](https://linear.app/outpredict/project/outpredict-c7ce4c02b8a4).
-  Setup is tracked in [OUT-5](https://linear.app/outpredict/issue/OUT-5/prepare-autonomous-development-tooling).
-- Linear MCP is authenticated at `https://mcp.linear.app/mcp`; live reads and project/
-  issue writes passed. Newly configured MCP tools may require a fresh Codex session.
-- The existing Linear Code GitHub App is installed specifically for this repository.
-  Use the issue-generated `username/identifier-title` branch and `Fixes OUT-<number>`
-  in the PR body. Public GitHub comments and GitHub issue duplication are disabled;
-  native PR linking is separate from those settings. PR #1 attached automatically
-  to OUT-5; no manual attachment was added. Team automation is PR open →
-  In Progress, review activity → In Review, and PR merge → Done. Verify deployment
-  separately; reopen/update the issue if a release fails.
+## Accounts and release workflow
 
-## Local commands
+- GitHub: `kingofsunnyvale/outpredict`, default branch `main`. The configured `gh`
+  login is `kingofsunnyvale`, with repository admin access and the `workflow` scope.
+- Linear: [Outpredict workspace](https://linear.app/outpredict), team **Outpredict**
+  (`OUT`), [Outpredict project](https://linear.app/outpredict/project/outpredict-c7ce4c02b8a4).
+  Linear MCP is configured at `https://mcp.linear.app/mcp`.
+- Create one issue per meaningful change, use its generated branch, and include
+  `Fixes OUT-<number>` in the PR. Record acceptance criteria, blockers, checks, and
+  PR/deployment links. Linear's merge automation marks issues Done; separately
+  verify deployment and reopen/update the issue if release fails.
+- Main requires a PR, the `checks` status, an up-to-date branch, and resolved
+  conversations, including for admins. The recorded configuration does not require
+  a human review. Recheck branch protection and CI on the actual release commit.
+- State/schema/ingestion changes use `backend-state`. Verify the issue branch in
+  staging before merge, coordinate shared staging, and record the tested commit.
 
-Use Node **24.20.0** from `.node-version` and npm. On this machine, Node 24 is also
-available through `npm exec --yes --package=node@24.20.0 -- <command>`.
+The product build is tracked in OUT-7 (corpus), OUT-8 (conversations/files),
+OUT-9 (agent/evidence), and OUT-10 (interface), following the OUT-5/OUT-6 setup.
+[OUT-11](https://linear.app/outpredict/issue/OUT-11/expand-the-reviewed-student-forum-corpus-across-accessible-public)
+queues expanded public-forum collection for a later subagent handoff after release.
+It has no numerical target or artificial record cap; collection has not started.
+
+## Local development and checks
+
+Use Node **24.20.0**, npm, and the pinned project dependencies. This machine can
+also invoke Node 24 with `npm exec --yes --package=node@24.20.0 -- node ...`.
+Use `uv` for Python and `gh` for GitHub. Read the Cloudflare/Wrangler skills before
+provider operations and run project-local Wrangler from this directory.
 
 ```sh
 npm ci
+npm run db:migrate:local
 npm run dev
 npm run lint
 npm run typecheck
+node scripts/validate-corpus.mjs
+node scripts/smoke-product.mjs --self-test
 npm test
 npm run build
-npm run deploy:staging
-npm run deploy:production
 ```
 
-`dev` serves the frontend and Worker at `http://localhost:8787` with local staging
-storage and a local `AUTH_URL` override. Copy `.dev.vars.example` to ignored
-`.dev.vars` and supply the staging Google client credentials and a development-only
-auth secret. Apply local auth tables with `npm run db:migrate:local` first. The AI
-binding is remote if later code calls it; the setup page performs no inference.
-`build` builds Vite assets and bundles both environments without publishing.
-Label state/schema/ingestion changes `backend-state` and deploy the issue
-branch to staging before merge. Staging is shared between branches; record the tested
-commit in Linear. Labels do not create environments. `cf-typegen` regenerates `worker-configuration.d.ts` after binding changes.
-Dependencies and the lockfile are pinned. The scoped Sharp override fixes a vulnerable
-transitive Miniflare dependency; remove it once upstream includes the fixed version.
-GitHub Actions runs install, dependency audit, lint, typecheck, Workers integration
-tests, and build for PRs/main. Tests exercise the real local D1 migration, signed
-sessions, isolation, expiry/revocation, OAuth origins/redirects, and built assets.
-The setup PR passed its first CI run. Main requires the GitHub Actions `checks` status,
-up-to-date branches, a PR, and resolved conversations, including for admins. There is
-no required human review, so an authorized agent can merge after checking the diff.
+Copy `.dev.vars.example` to ignored `.dev.vars`, supplying the staging Google
+client and a development-only auth secret. `dev` uses `http://localhost:8787`,
+local staging D1/R2, and a local `AUTH_URL` override. Import the reviewed corpus
+locally with `node scripts/import-corpus.mjs --env staging` when testing retrieval.
+AI is remote: development chat/document calls can invoke Cloudflare.
 
-## Cloudflare resources
+`build` bundles both environments without publishing; `cf-typegen` regenerates
+binding types. CI runs installation, dependency audit, lint, typecheck, corpus and
+smoke validation, Workers integration tests, and builds. Verify changed user flows
+in a browser. Remove the pinned Sharp override when Miniflare's upstream is fixed.
 
-Account: `8b1ada8b10e9e8e5664ec10bd9d3c370`. Local Wrangler OAuth works.
-Project-local Wrangler is **4.130.0**; use `npx wrangler` in this directory.
+## Cloudflare resources and deployment
 
-| Environment | Worker | D1 binding `DB` | R2 binding `DATA` |
+Cloudflare account: `8b1ada8b10e9e8e5664ec10bd9d3c370`. Project-local Wrangler is
+**4.130.0**. Resource IDs and explicit environment bindings are in `wrangler.jsonc`.
+
+| Environment | Worker | D1 `DB` | Private R2 `DATA` |
 |---|---|---|---|
 | Staging | `outpredict-staging` | `outpredict-staging` | `outpredict-staging-data` |
 | Production | `outpredict` | `outpredict` | `outpredict-data` |
 
-Resource IDs are in `wrangler.jsonc`. R2 activation was explicitly approved and
-completed. Both databases passed remote create/insert/read/drop checks, and both
-buckets passed upload/download/compare/delete checks; temporary artifacts were removed.
-Buckets are private. AnyWager resources are separate and were not modified.
+The shared hostname ends in `anywager.workers.dev`; Outpredict resources are
+separate. Do not modify AnyWager resources. Initial D1/R2 CRUD checks passed.
 
-Both Workers were deployed successfully using Wrangler; their `/healthz` routes
-returned HTTP 200 with the correct environment. The shared account subdomain is
-`anywager.workers.dev`; the Worker and storage resources themselves are separate.
+Workers Builds connects both Workers to GitHub with a Cloudflare-managed token.
+Main merges trigger deployment; production branch previews are disabled. Staging
+versions share staging D1/R2. Use the stable staging origin for authentication;
+arbitrary version-preview origins cannot authenticate.
 
-Cloudflare Workers Builds is connected to `kingofsunnyvale/outpredict` for both
-Workers, using the existing Cloudflare-managed build token (no token was copied
-into this repository or GitHub). Build runtime is Node 24.20.0. The build command
-runs lint, typecheck, and build; the environment-specific npm deploy command runs
-on `main`. Production branch previews are disabled. Other branches upload preview
-versions with `npx wrangler versions upload --env staging`; these share staging
-D1/R2, so coordinate state-changing tests between branches.
+The migration sequence is `0001_auth.sql`, `0002_corpus.sql`, then
+`0003_conversations.sql`; all three are applied in both environments.
+Migrations never run automatically. Apply reviewed pending migrations and imports
+in staging, deploy and verify, then apply corresponding production state changes
+before merging dependent code:
 
-Automatic staging preview build passed for setup commit `d3d771e`. Current build,
-merge, and deployment evidence is recorded in [OUT-5](https://linear.app/outpredict/issue/OUT-5/prepare-autonomous-development-tooling)
-and [PR #1](https://github.com/kingofsunnyvale/outpredict/pull/1). Always inspect the
-checks for the latest commit and verify health after merging.
+```sh
+npm run db:migrate:staging
+npm run deploy:staging
+# Run the deployed API smoke and browser checks below.
+npm run db:migrate:production
+# Import reviewed production data if this release changes it, then merge after CI.
+```
 
-## Other verified capabilities and deferred work
+`npm run deploy:production` supports coordinated direct releases/recovery. A merge
+is a release: inspect deployment and resolve failures before calling it shipped.
 
-- Git, `curl`, and `jq` passed authenticated/HTTPS/JSON checks.
-- `uv` 0.10.8 ran Python 3.12.11; JSON and SQLite checks passed.
-- Interactive browser navigation, clicking, and screenshots work. Manual browser
-  verification complements the Workers integration tests; Playwright is not required.
-- Cloudflare Vectorize and Queues catalog reads passed; no product resources exist
-  for them yet. Workers AI is bound as `AI`, with `AI_MODEL` set to
-  `@cf/openai/gpt-oss-120b`. An authenticated, bounded model request returned HTTP 200
-  and the expected response. No public inference endpoint is exposed.
-- Initial data collection will be a later one-time Codex pass. OpenAI API access is
-  not a prerequisite for that collection; the previously present API credential
-  returned 401 and was not repaired or used for inference.
-- The product is free, so Stripe is excluded. Email and a custom domain remain
-  future feature decisions. Docker is not required; its local engine is not running.
+## Google authentication and credentials
 
-Credentials stay in credential/secret stores and ignored local files. Recheck
-access in a future environment rather than assuming it inherits this machine's login.
-
-## Authentication configuration
-
-Setup checkpoint: separate production and staging-runtime OAuth clients were
-created, with credentials saved to ignored mode-0600 files and Cloudflare secrets.
-Independent auth secrets are preserved in each environment. The original staging
-client whose secret was not saved remains unused. OAuth branding has application,
-privacy, and terms links, and basic-identity login was published for external users.
-The auth migration has been applied to both environments. Staging branch deployment
-`7e731216-177f-4958-9b8c-20ceeb7fec89` successfully completed a real Google browser
-round trip on September 9. Local checks (11 auth tests, lint, typecheck, both builds,
-and zero-vulnerability dependency audit) were independently rechecked. Production
-release verification is still pending; check the linked OUT-6 issue/PR for updates.
-
-Google Cloud project: `outpredict-20260909` (number `930855311603`). Use an explicit
-`--project=outpredict-20260909` in Google CLI commands; the machine's default project
-belongs to another app. No billing account was linked. OAuth branding uses
-**Outpredict**, an external audience, and only basic sign-in identity scopes:
-`openid`, `email`, and `profile`.
+Google Cloud project: `outpredict-20260909` (`930855311603`). Always pass
+`--project=outpredict-20260909` to Google CLI commands; this machine's default
+project belongs to another application. No Google billing account was linked.
+Outpredict uses an external OAuth audience with only `openid`, `email`, and
+`profile` scopes. Staging and production have separate Google clients and auth
+secrets. OUT-6 authentication was verified in staging and production. Repeat the
+sign-in and sign-out flows when verifying the final OUT-10 interface.
 
 | Environment | Application origin | Google redirect URI |
 |---|---|---|
@@ -133,44 +114,102 @@ belongs to another app. No billing account was linked. OAuth branding uses
 | Staging | `https://outpredict-staging.anywager.workers.dev` | `https://outpredict-staging.anywager.workers.dev/api/auth/callback/google` |
 | Production | `https://outpredict.anywager.workers.dev` | `https://outpredict.anywager.workers.dev/api/auth/callback/google` |
 
-`AUTH_URL` is fixed per environment. Staging and production need separate Google
-clients and independently generated `BETTER_AUTH_SECRET` values; local development
-uses the staging client with its registered localhost callback. Worker secrets are
-`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `BETTER_AUTH_SECRET`. Never put actual
-values in Wrangler configuration, documentation, GitHub, or Linear.
+Worker secrets are `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and
+`BETTER_AUTH_SECRET`. Local copies are ignored mode-0600 `.env.auth-staging.json`
+and `.env.auth-production.json`; development uses `.dev.vars`. Credentials belong
+in secret stores or ignored private files, never Git, output, Linear, or PRs.
 
-Before deploying code that needs auth tables, run `npm run db:migrate:staging`,
-verify the issue branch in staging, then run `npm run db:migrate:production` before
-merging. Migrations are not executed during requests or automatically by deploy.
-Version preview URLs intentionally disable login: use the stable staging origin
-for OAuth tests. `/api/setup` reports whether login is configured for that origin;
-`/api/me` returns only the identity from a valid server session. Unauthenticated
-requests receive 401; missing configuration receives 503. Auth responses are not
-cached, and state-changing auth requests require the configured Origin header.
+`AUTH_URL` is fixed per environment. `/api/setup` reports readiness; `/api/me` uses
+the verified server session. Private APIs enforce ownership, disable caching, and
+require trusted origins for mutations. Recheck `gh`, Wrangler, and Linear logins
+when moving environments.
 
-## Live search readiness
+## Corpus, runtime, and service limits
 
-Live search is **not yet verified**. Cloudflare's experimental native Web Search
-returned `account_disabled` (7078), despite the local OAuth token having
-`websearch.run`. Its CLI has no enable command and no verified self-service
-activation path was found. Cloudflare AI Search is a separate retrieval product.
+The corpus has **58 source accounts**: 49 Reddit, 7 SDN, and 2 MDApplicants across
+2023–24 through 2025–26. Its 145 outcome observations are not applicant counts.
+D1 retrieval separates available, matched, retrieved, and cited accounts. These
+self-selected reports cannot establish personal odds or causal effects.
 
-An Outpredict-only Google public-search service account and API key were prepared
-as a possible fallback. The key is restricted to `generativelanguage.googleapis.com`
-and stored only in ignored `.env.search-setup` (mode 0600). Billing remains disabled.
-Both Gemini 2.5 Flash and Flash-Lite grounded query tests returned HTTP 404 because
-those models are no longer available to new users. No paid fallback was invoked,
-and this credential has not been deployed to the Worker. Free-tier Google services
-must not receive confidential applicant documents or chat context; any future
-use needs a separate, sanitized public-information query.
+`data/corpus.json` contains reviewed facts and provenance; full source text stays
+in private R2. The idempotent importer validates records and artifact hashes:
 
-Actual Cloudflare Markdown conversion was tested with synthetic PDF, DOCX, and
-PNG résumés: all reproduced GPA, MCAT, activities, dates, and planned hours.
-A scanned PDF returned empty content despite a success status; the product must
-detect insufficient extracted text and request page images or a text-based PDF.
-The experimental PDF image-conversion option produced an inaccurate description
-and is not a verified fallback. The selected main model is text-only.
+```sh
+node scripts/import-corpus.mjs --sql /tmp/outpredict-corpus.sql
+node scripts/import-corpus.mjs --env staging --remote --artifacts /path/to/reviewed-source-artifacts
+```
 
-The full build is tracked in OUT-7 (reviewed corpus), OUT-8 (conversations/files),
-OUT-9 (agent/evidence), and OUT-10 (reference interface). These capabilities are not
-part of the foundation release until their own checks and live verification pass.
+`--artifacts` names a local directory containing the reviewed source files whose
+SHA-256 digests and object keys appear in `data/corpus.json`. The initial release's
+objects are already imported into both private buckets; routine re-imports may
+omit the option when those matching objects exist. Preserve source artifacts in
+private storage, not a `/tmp` directory as a durable dependency. Verify staging
+before an explicit production import. See DATA.md for scope and limitations.
+
+The configured model is **`@cf/zai-org/glm-5.3-flash`**. Sampled live checks
+verified corpus comparisons, conditional time-budget arithmetic, attachment
+citations, and sentence-format repair; see RUNTIME.md for the evidence and
+limitations. OUT-9 passed real staging and production runtime verification.
+Private reasoning is not exposed; interrupted answers retain partial text and
+retry state. Up to two cohort searches permit one refinement. The application
+finalizes supporting counts after citations are known and reports the actual
+available, matching, and retrieved counts for the latest cohort. Numeric-summary
+populations remain separate from cited supporting accounts.
+
+Student-source records are the product's research evidence. Retrieval searches and
+inspects the reviewed D1 corpus; it does not search the web or fetch outside policy
+pages. Optional user documents supply personal context and remain private. The
+agent must state when the available reports do not support a requested conclusion,
+keep unknown outcomes distinct, and avoid filling missing evidence from general
+model knowledge. Source links identify the forum material behind retrieved facts;
+they are not an additional live research service.
+
+Expanded collection is tracked in OUT-11. The current SDN inventory enumerates
+3,239 threads and 2,882 source accounts, not qualifying imported records. The later
+workstream should collect as much accessible public forum material as practical,
+preserve raw reviewed source coverage separately from the queryable corpus, and
+report exact visited/parsed/reviewed/imported/excluded counts and missingness.
+Current quality and explicit-outcome requirements must not be silently relaxed.
+Supporting incomplete profiles requires deliberate schema, query, UI-count, and
+missingness work with staging checks. Use resumable, rate-compliant collection
+and verify each backfill in staging before
+production. Neither inventory size nor a user's estimate is an imported count.
+
+TXT/Markdown decode locally; PDF, DOCX, PNG, and JPEG use Cloudflare conversion.
+Synthetic format checks passed; unreadable scans receive alternatives. Limits:
+8 MiB/file, 40 retained files/64 MiB/account, four attachments/message, 20 accepted
+uploads/UTC day, 100 conversations, 200 messages/conversation, and 50 generation
+attempts/UTC day. Started uploads/generations count even on failure; deletion
+does not reset daily usage.
+File deletion removes originals, extracted text, and source excerpts; existing
+answer prose remains until chat deletion. See STORAGE.md. There are no paid tiers.
+
+## Deployed verification and release record
+
+```sh
+node scripts/smoke-product.mjs --env staging --storage-only
+node scripts/smoke-product.mjs --env staging
+node scripts/smoke-product.mjs --env staging --agent
+node scripts/smoke-product.mjs --env staging --agent --report /tmp/outpredict-corpus-review.json
+node scripts/smoke-product.mjs --env production --agent
+```
+
+`--storage-only` supports OUT-8 before streaming ships. Default adds stored-answer
+replay without AI; `--agent` adds one real retry and citation-count checks.
+`--report` optionally saves only answer/evidence/progress from the synthetic
+corpus scenario in a new mode-0600 file. Two synthetic sessions
+exercise ownership/history/files/cancellation and clean up exact R2/D1 fixtures.
+Tokens and answer content are never printed to the console. Failed cleanup can be
+retried with `--env <same-environment> --cleanup <reported-manifest-path>`. Also
+verify Google sign-in and desktop/mobile flows in a browser.
+
+The following merged checkpoints are verified in both environments. Final
+interface deployment and browser evidence is recorded with OUT-10.
+
+| Issue | Merge/release evidence |
+|---|---|
+| OUT-6 | [PR #3](https://github.com/kingofsunnyvale/outpredict/pull/3), merge `b3b071fc22c1845aa13ddc19b7628a5af0816c6d`; authentication/hosting verified in staging and production. |
+| OUT-7 | [PR #4](https://github.com/kingofsunnyvale/outpredict/pull/4), merge `635de31940acda38a6cb9c0d9331a3debb73b2c8`; 58 reviewed accounts and private source artifacts verified in both environments. |
+| OUT-8 | [PR #5](https://github.com/kingofsunnyvale/outpredict/pull/5), merge `c44b89be46dd4f21d0028ff86aa532ee34bd3ec6`; private storage APIs and synthetic cleanup verified in both environments. |
+| OUT-9 | [PR #6](https://github.com/kingofsunnyvale/outpredict/pull/6), merge `420a509a2a2592df188af482825a7758288302c9`; 72 tests and required checks pass. Staging branch `58c3f3a` / version `5dcccc68-a195-42c2-be33-0dbca3c9a97f` passed real-agent and private-storage smoke. Automatic main deployments passed: staging `55e674ec-ea98-4041-afcd-09b57483ad29`, production `fe0d16b6-e58e-4607-8518-958187f5c5fc`. Production smoke and manual answer review passed: 58 matching, 12 retrieved, two cited supporting accounts, saved evidence/calculations consistent, exact synthetic cleanup complete. |
+| OUT-10 | **Pending.** Final UI commit/PR/CI, deployment IDs, desktop/mobile flows, and complete product verification remain required. |

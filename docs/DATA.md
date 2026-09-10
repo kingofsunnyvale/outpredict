@@ -103,8 +103,11 @@ Returned counts mean:
 | `withReportedOutcomes` | Matching accounts with explicit, nonconditional acceptance/rejection evidence in their selected cycle. |
 | `summarized` | Matching accounts read for deterministic numerical summaries, at most 1,000. |
 
-The model/answer layer determines **supporting profiles** from the actual profile
-citations used in its answer. This count is not fabricated by the cohort module.
+The application determines **supporting profiles** from distinct retrieved source
+accounts whose profile citations appear in the final answer. The model does not
+supply this count. The application saves the calculation/evidence values and
+appends an accurate count statement; explicit short-format constraints leave those
+counts in the evidence panel. See [RUNTIME.md](RUNTIME.md).
 Source and cycle coverage describe the matched account set. Summaries report `n`
 and excluded/missing denominator separately for each statistic. Hour medians use
 only exact numerical reports or explicit zero, excluding estimates, ranges,
@@ -115,27 +118,62 @@ and inspectable. Numerical summaries do not establish causality or probabilities
 
 Use Node 24.20.0 and the installed project-local Wrangler. Read the Cloudflare and
 Wrangler skills before executing provider commands. Apply the corpus migration to
-staging first; this change is `backend-state`. Parent release coordination controls
-staging and production changes.
+staging first; this change is `backend-state`. Coordinate shared staging and
+record the tested commit/deployment before changing production.
 
 ```sh
 node scripts/validate-corpus.mjs
 node scripts/import-corpus.mjs --sql /tmp/outpredict-corpus.sql
 npm run db:migrate:staging
-node scripts/import-corpus.mjs --env staging --remote --artifacts /tmp/outpredict-corpus-artifacts
+node scripts/import-corpus.mjs --env staging --remote --artifacts /path/to/reviewed-source-artifacts
 ```
 
 The importer validates the complete dataset before writing, checks source-artifact
 SHA-256 digests, uploads only to `outpredict-staging-data` or `outpredict-data`, then
 executes idempotent SQL against the explicit Outpredict environment/config. No
 secret value is needed in the data files or emitted by the importer. The optional
-artifact directory is the one-time collection handoff; omit it for a repeat import
-whose artifacts already exist. Do not expose corpus artifact keys as public bucket
+artifact directory contains the reviewed source files matching the committed keys
+and digests. All 58 initial source artifacts are already in both private R2 buckets;
+omit the option for a repeat import when those matching objects exist. Preserve
+source captures in private storage; a temporary local directory is not a durable
+runtime dependency. Do not expose corpus artifact keys as public bucket
 URLs. Source text is private R2 audit material.
 
 Verify staged counts, filter behavior, source inspection, and source-artifact
 retrieval before applying the production migration/import. The SQL generation
 mode performs no provider mutation. Corpus tests exercise actual D1 SQL, distinct
 accounts versus repeated outcomes, missing and mixed-timing hours, exact filter
-boundaries, injection-shaped text, and invalid model filters. Before calling this
-release shipped, verify the production database and runtime retrieval after merge.
+boundaries, injection-shaped text, and invalid model filters. Verify production
+counts and runtime retrieval after every future merge/backfill.
+
+The initial release shipped through
+[PR #4](https://github.com/kingofsunnyvale/outpredict/pull/4), main commit
+`635de31940acda38a6cb9c0d9331a3debb73b2c8`. Staging and production SQL confirmed
+58 current profiles and 145 outcome observations, no foreign-key violations, and
+58 checksum-verified private artifacts. Live `/api/corpus/stats` returned the same
+source/cycle coverage in both environments.
+
+## Later collection
+
+[OUT-11](https://linear.app/outpredict/issue/OUT-11/expand-the-reviewed-student-forum-corpus-across-accessible-public)
+is queued for a later subagent handoff after the product release. It seeks as much
+accessible public applicant-forum coverage as practical, with no numerical target
+or artificial record cap. Collection has not started. The existing SDN inventory
+contains 3,239 threads and 2,882 source accounts; these are discovery counts, not
+qualifying records or verified distinct people.
+
+Raw source coverage and the reviewed queryable corpus are separate measures.
+Maximizing collection must not silently relax the initial release's academic,
+activity, or explicit-outcome qualification standard to inflate its counts.
+The validator permits null GPA/MCAT values but still requires multiple activity
+categories and explicit acceptance/rejection evidence; all 58 current profiles
+have numerical GPA/MCAT. Broader incomplete profiles can be retained as incomplete source
+material. Making them queryable requires deliberate missingness/schema, query,
+and UI-count support, tested in staging. Unknown outcomes must never enter the
+known acceptance/rejection denominator by inference.
+
+The later pipeline must be resumable and rate-compliant, respect access boundaries,
+preserve canonical provenance and account/cycle versions, and report exact
+visited, parsed, reviewed, imported, excluded, failed, and missingness counts.
+Collection and backfills remain separate from runtime: the product searches the
+reviewed student corpus and does not open outside webpages.

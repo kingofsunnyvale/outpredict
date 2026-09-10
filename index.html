@@ -3,12 +3,27 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#f7f8f5" />
+    <meta name="theme-color" content="#ffffff" />
     <meta name="description" content="Free, data-driven medical-school admissions advice for students." />
     <title>Outpredict</title>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div style="max-width:32rem;margin:18vh auto;padding:24px;font:16px/1.6 Arial,sans-serif;color:#262626">
+        <strong>outpredict.</strong>
+        <p id="startup-status" role="status">Loading your workspace…</p>
+        <a href="" style="color:inherit">Reload page</a>
+        <noscript><p>Enable JavaScript to use Outpredict.</p></noscript>
+      </div>
+    </div>
+    <script>
+      window.addEventListener("error", function (event) {
+        if (event.target instanceof HTMLScriptElement) {
+          var status = document.getElementById("startup-status");
+          if (status) status.textContent = "Outpredict couldn't load. Please reload the page to try again.";
+        }
+      }, true);
+    </script>
     <script type="module" src="/frontend/main.tsx"></script>
   </body>
 </html>
