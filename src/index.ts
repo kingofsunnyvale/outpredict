@@ -1,5 +1,6 @@
 import { authIsConfigured, createAuth } from "./auth";
 import { handleChatApi } from "./chat-api";
+import { handleChatStream } from "./chat-stream";
 import { getCorpusStats, inspectProfile } from "./cohort";
 import { publicPage } from "./public-pages";
 
@@ -20,7 +21,7 @@ const authRoutes = new Map([
 ]);
 
 export default {
-  async fetch(request, env): Promise<Response> {
+  async fetch(request, env, ctx): Promise<Response> {
     const { pathname, origin } = new URL(request.url);
 
     if (request.method === "GET") {
@@ -95,11 +96,14 @@ export default {
         ).api.getSession({ headers: request.headers, returnHeaders: true });
         if (!session)
           return json({ error: "Sign in to continue." }, 401, sessionHeaders);
-        const response = await handleChatApi(request, env, {
+        const user = {
           id: session.user.id,
           name: session.user.name,
           email: session.user.email,
-        });
+        };
+        const response =
+          (await handleChatStream(request, env, user, ctx)) ??
+          (await handleChatApi(request, env, user));
         if (!response) return json({ error: "Not found" }, 404);
         const headers = new Headers(response.headers);
         for (const cookie of sessionHeaders.getSetCookie())

@@ -1,4 +1,4 @@
-import { env, SELF } from "cloudflare:test";
+import { createExecutionContext, env, SELF } from "cloudflare:test";
 import { getMigrations } from "better-auth/db/migration";
 import { describe, expect, it } from "vitest";
 import { createAuth } from "../src/auth";
@@ -81,11 +81,13 @@ describe("hosting and setup", () => {
     const setup = await worker.fetch(
       new Request(`${origin}/api/setup`),
       missing,
+      createExecutionContext(),
     );
     expect(await setup.json()).toMatchObject({ googleSignIn: false });
     const login = await worker.fetch(
       new Request(`${origin}/api/auth/sign-in/social`, { method: "POST" }),
       missing,
+      createExecutionContext(),
     );
     expect(login.status).toBe(503);
     const preview = await SELF.fetch("https://preview.example/api/setup");
@@ -97,6 +99,48 @@ describe("hosting and setup", () => {
 });
 
 describe("database sessions", () => {
+  it("uses only verified identity for conversation APIs and rejects anonymous inference", async () => {
+    expect((await SELF.fetch(`${origin}/api/chats`)).status).toBe(401);
+    expect(
+      (
+        await SELF.fetch(`${origin}/api/chats/any/messages`, {
+          method: "POST",
+          headers: { Origin: origin },
+          body: "{}",
+        })
+      ).status,
+    ).toBe(401);
+    const first = await signedSession("product-first@example.test");
+    const second = await signedSession("product-second@example.test");
+    const created = await SELF.fetch(`${origin}/api/chats`, {
+      method: "POST",
+      headers: {
+        Origin: origin,
+        Cookie: first.cookie,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        title: "Verified ownership",
+        userId: second.user.id,
+      }),
+    });
+    expect(created.status).toBe(201);
+    const { chat } = (await created.json()) as { chat: { id: string } };
+    expect(
+      (
+        await SELF.fetch(`${origin}/api/chats/${chat.id}`, {
+          headers: { Cookie: second.cookie },
+        })
+      ).status,
+    ).toBe(404);
+    expect(
+      (
+        await SELF.fetch(`${origin}/api/chats/${chat.id}`, {
+          headers: { Cookie: first.cookie },
+        })
+      ).status,
+    ).toBe(200);
+  });
   it("has a migration matching every configured Better Auth table and index", async () => {
     const migration = await getMigrations(createAuth(env).options);
     expect(migration.toBeCreated).toEqual([]);
