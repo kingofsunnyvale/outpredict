@@ -2,6 +2,17 @@
 
 Free, data-driven medical-school admissions advice for students.
 
+## Product evidence
+
+- Runtime admissions evidence comes from the scraped, reviewed student-profile
+  corpus and information supplied by the student. Do not add external search,
+  webpage retrieval, or outside-policy sources to conversations.
+- Keep reported facts, calculations, and interpretation distinct. State when the
+  corpus cannot support a conclusion; do not fill gaps with invented school rules.
+- Expanded forum collection is tracked in OUT-11. Collect as much accessible
+  public material as practical, without an artificial record target. Keep raw
+  collection counts separate from reviewed, imported, and outcome-bearing profiles.
+
 ## Branches, Linear, deploys
 
 - Use Linear for Avneesh's visibility: one issue per meaningful feature/fix,

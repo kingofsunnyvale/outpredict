@@ -1,15 +1,22 @@
-# outpredict
-Data driven med-school advice
+# Outpredict
+Free, data-driven medical-school admissions advice.
 
-The product is free. Initial applicant data will be collected and reviewed by
-Codex in a one-time pass when requested; an OpenAI API integration is not required
-for that collection. Browser verification is manual for now.
+[Open Outpredict](https://outpredict.anywager.workers.dev) ·
+[Staging](https://outpredict-staging.anywager.workers.dev)
 
-See [AGENTS.md](AGENTS.md) for the development workflow and
-[tooling status](docs/TOOLING.md) for service access and setup checks.
+Sign in with Google and ask a question. Attach a résumé or image when helpful,
+inspect the evidence, and continue the conversation later. Comparisons use 58
+reviewed public source accounts, with visible counts and missing-data limits.
+The service has no subscriptions; account limits keep shared usage bounded.
+Admissions evidence comes from the imported student corpus and your own inputs.
+The assistant does not search the web or fetch outside information.
 
-Use Node 24.20.0, then `npm ci` and `npm run dev`. The bootstrap exposes
-`GET /healthz`; it contains no applicant data or product UI yet.
+The app uses React/Vite, Cloudflare Workers AI, Better Auth, D1, and private R2.
+Use Node 24.20.0 and the pinned npm dependencies. Configure ignored `.dev.vars`
+from the example, run `npm ci`, apply local migrations with
+`npm run db:migrate:local`, and start `npm run dev`.
 
-- [Staging health](https://outpredict-staging.anywager.workers.dev/healthz)
-- [Production health](https://outpredict.anywager.workers.dev/healthz)
+See [tooling and deployment](docs/TOOLING.md), [corpus provenance](docs/DATA.md),
+[runtime and evidence](docs/RUNTIME.md), [private storage](docs/STORAGE.md),
+and [interface verification](docs/INTERFACE.md). Follow [AGENTS.md](AGENTS.md)
+for Linear, checks, PRs, and releases.

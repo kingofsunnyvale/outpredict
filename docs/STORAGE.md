@@ -6,23 +6,34 @@ file metadata, and daily usage. R2 originals are private and downloaded only
 through an authenticated ownership check. Separate staging and production
 bindings are in `wrangler.jsonc`.
 
-Apply `0003_conversations.sql` in staging with `npm run db:migrate:staging`, deploy
-the issue branch, and run the deployed checks before applying it in production.
-Migrations are additive and are never run in a request handler.
+Migration `0003_conversations.sql` is applied and the OUT-8 storage release is
+verified in staging and production. For later changes, apply migrations in staging
+with `npm run db:migrate:staging`, deploy the issue branch, and verify it before
+production. Migrations are additive and never run in a request handler or
+implicitly during deployment.
 
 ## Uploads and deletion
 
-Supported uploads are TXT, text-based PDF, DOCX, PNG, and JPEG. MIME types,
-file signatures, sizes, and extracted content are checked. TXT is decoded locally;
-other supported files use Cloudflare Markdown conversion. Empty/scanned PDFs
+Supported uploads are TXT, Markdown, text-based PDF, DOCX, PNG, and JPEG. MIME
+types, file signatures, sizes, and extracted content are checked. TXT/Markdown
+decode locally; other supported files use Cloudflare Markdown conversion. Empty/scanned PDFs
 receive an extraction error directing the user to a text PDF or page image.
 Conversion has a timeout, and failures remain visible for removal or replacement.
+Private reads reconcile processing uploads older than the 180-second lease to an
+interrupted failure, preserving their originals and consumed quota. A late
+conversion cannot resurrect that failed record. The file manager polls while an
+upload is processing and exposes the original download and a fresh-upload path.
 
 Limits are 8 MiB per file, 64 MiB and 40 retained files per account, four attachments
-per message, 20 attempted uploads per UTC day, 100 saved conversations, 200 messages
-per conversation, and 50 generated turns per UTC day. Atomic reservations prevent
-concurrent requests from exceeding limits. Failed conversions count; deleting
-files or conversations does not reset daily usage.
+per message, 20 accepted upload attempts per UTC day, 100 saved conversations,
+200 messages per conversation, and 50 reserved generation attempts per UTC day.
+Atomic reservations prevent concurrent requests from exceeding limits. An upload
+reservation occurs after format/storage validation and before R2 writes or AI
+conversion, including locally decoded TXT/Markdown. Invalid formats and storage-cap
+rejections do not consume an upload attempt. Failures after reservation count;
+deleting files or conversations does not reset daily usage. Daily limits reset at
+UTC midnight. Upload quota responses use HTTP 429 with `conversion_usage_limit`;
+generation retries also consume their daily reservation.
 
 File removal deletes its original and extracted text and scrubs attachment-source
 excerpts from saved evidence. It fences active generation so a stale request cannot
@@ -41,8 +52,9 @@ Every partial/final write checks the active generation ID. Cancellation requires
 that same ID, so a delayed Stop cannot cancel a newer answer. A renewable lease
 allows an interrupted generation to become retryable while retaining partial text.
 
-The runtime streaming handler is delivered separately in OUT-9. The storage-only
-release exposes chat/file CRUD and cancellation but does not generate answers.
+OUT-8 shipped the storage APIs and generation-state controls. The streaming
+handler is part of OUT-9; consult [TOOLING.md](TOOLING.md) for its current release
+verification. Storage-only smoke checks do not invoke the model.
 
 ## Verification
 
@@ -56,8 +68,15 @@ node scripts/smoke-product.mjs --env staging --storage-only
 node scripts/smoke-product.mjs --env production --storage-only
 ```
 
-After the runtime is deployed, omit `--storage-only` to test replay and add
-`--agent` for one real streamed answer. A protected cleanup manifest supports
-resuming cleanup after interruption. The script never uses a real user's session
+Both environments passed the deployed storage-only smoke: real TXT
+upload/download, cross-account isolation, saved-history reopen, fenced
+cancellation, attachment-evidence scrubbing, conversation removal, and complete
+synthetic-record/private-file cleanup. The merged release is
+[PR #5](https://github.com/kingofsunnyvale/outpredict/pull/5), commit
+`c44b89be46dd4f21d0028ff86aa532ee34bd3ec6`.
+
+When verifying the runtime release, omit `--storage-only` to test completed-answer
+replay and add `--agent` for one real streamed answer. A protected cleanup manifest
+supports resuming cleanup after interruption. The script never uses a real user's session
 or prints credentials. These API checks complement actual Google login and UI
 verification; they do not substitute for those flows.
