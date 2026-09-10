@@ -1,4 +1,8 @@
-import { readBoundedBody, uploadAttachment } from "./attachments";
+import {
+  readBoundedBody,
+  reconcileStaleAttachments,
+  uploadAttachment,
+} from "./attachments";
 import {
   type AttachmentRow,
   attachmentMetadata,
@@ -72,6 +76,7 @@ export async function handleChatApi(
         "Untrusted request origin.",
         "untrusted_origin",
       );
+    if (request.method === "GET") await reconcileStaleAttachments(env, user.id);
     if (url.pathname === "/api/chats") {
       if (request.method === "GET")
         return productJson({ chats: await listChats(env, user.id) });

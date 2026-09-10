@@ -1,11 +1,77 @@
+import officialSiteDirectory from "../data/official-sites.json";
 import { ProductError, type Source } from "./product-types";
 
 export type PublicSearchResult = {
   title: string;
   url: string;
   content: string;
+  method?: "official_site" | "web_search";
+  discoveredFrom?: string;
+  discoveredAt?: string;
 };
 type Fetcher = typeof fetch;
+
+type ResearchProvider = "duckduckgo" | "tavily" | "publisher";
+
+function researchFailure(
+  provider: ResearchProvider,
+  code: string,
+  message: string,
+  details: { status?: number; kind?: string } = {},
+): ProductError {
+  // Do not log queries, URLs, headers, credentials, response bodies, or private
+  // context. These fixed categories distinguish edge/network/provider failures.
+  console.warn(
+    JSON.stringify({
+      event: "public_research_failure",
+      provider,
+      code,
+      ...details,
+    }),
+  );
+  return new ProductError(503, message, code);
+}
+
+async function researchFetch(
+  provider: ResearchProvider,
+  fetcher: Fetcher,
+  url: string,
+  init: RequestInit,
+): Promise<Response> {
+  try {
+    return await fetcher(url, init);
+  } catch (error) {
+    const name = error instanceof Error ? error.name : "Error";
+    const kind = ["TypeError", "TimeoutError", "AbortError"].includes(name)
+      ? name
+      : "Error";
+    const timeout = kind === "TimeoutError";
+    throw researchFailure(
+      provider,
+      timeout ? "research_timeout" : "research_network_error",
+      `${provider === "publisher" ? "The source page" : "Public source discovery"} ${timeout ? "timed out" : `could not connect (${kind})`}. No current information was verified by this request.`,
+      { kind },
+    );
+  }
+}
+
+async function researchText(
+  provider: ResearchProvider,
+  response: Response,
+  limit: number,
+): Promise<string> {
+  try {
+    return await readBoundedText(response, limit);
+  } catch (error) {
+    if (error instanceof ProductError) throw error;
+    throw researchFailure(
+      provider,
+      "research_body_error",
+      "The public source response was interrupted before it could be read.",
+      { status: response.status },
+    );
+  }
+}
 
 export const PUBLIC_INSTITUTIONS = [
   "AAMC",
@@ -232,9 +298,15 @@ export function buildPublicQuery(input: unknown): string {
 }
 
 const officialHosts = ["aamc.org", "aacom.org", "amcas.org", "lcme.org"];
+const directoryHosts = new Set(
+  officialSiteDirectory.flatMap((entry) =>
+    entry.urls.map((url) => new URL(url).hostname),
+  ),
+);
 
 export function isOfficialUrl(url: URL): boolean {
   return (
+    directoryHosts.has(url.hostname) ||
     url.hostname.endsWith(".edu") ||
     url.hostname.endsWith(".gov") ||
     officialHosts.some(
@@ -261,6 +333,7 @@ export function validatePublicUrl(value: unknown): URL {
     (url.port && url.port !== "443") ||
     !/^[a-z0-9.-]+$/.test(host) ||
     !host.includes(".") ||
+    host.endsWith(".") ||
     /^\d+(?:\.\d+)*$/.test(host) ||
     /(?:^|\.)(?:localhost|local|internal|test|invalid|onion)$/.test(host) ||
     /(?:^|\.)(?:nip\.io|sslip\.io|localtest\.me)$/.test(host)
@@ -334,40 +407,70 @@ export async function publicSearch(
   fetcher: Fetcher = fetch,
 ): Promise<PublicSearchResult[]> {
   const query = validateSearchQuery(queryInput);
-  if (!apiKey) return discoverPublicPages(query, signal, fetcher);
-  const response = await fetcher("https://api.tavily.com/search", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
+  if (!apiKey) return discoverOfficialPages(query, signal, fetcher);
+  const response = await researchFetch(
+    "tavily",
+    fetcher,
+    "https://api.tavily.com/search",
+    {
+      method: "POST",
+      redirect: "manual",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        query,
+        search_depth: "basic",
+        max_results: 5,
+        include_answer: false,
+        include_raw_content: false,
+        include_images: false,
+        auto_parameters: false,
+      }),
+      signal: AbortSignal.any([
+        AbortSignal.timeout(15_000),
+        ...(signal ? [signal] : []),
+      ]),
     },
-    body: JSON.stringify({
-      query,
-      search_depth: "basic",
-      max_results: 5,
-      include_answer: false,
-      include_raw_content: false,
-      include_images: false,
-      auto_parameters: false,
-    }),
-    signal: AbortSignal.any([
-      AbortSignal.timeout(15_000),
-      ...(signal ? [signal] : []),
-    ]),
-  });
+  );
   if (!response.ok) {
     await response.body?.cancel();
-    throw new ProductError(
-      503,
-      "Live search could not complete. Try again or share an official school webpage.",
-      "search_unavailable",
+    throw researchFailure(
+      "tavily",
+      response.status >= 300 && response.status < 400
+        ? "search_redirect"
+        : "search_unavailable",
+      `Live search returned HTTP ${response.status}. Share an official school webpage or try again later.`,
+      { status: response.status },
     );
   }
-  const body: unknown = JSON.parse(await readBoundedText(response, 200_000));
+  let body: unknown;
+  try {
+    body = JSON.parse(await researchText("tavily", response, 200_000));
+  } catch (error) {
+    if (error instanceof ProductError) throw error;
+    throw researchFailure(
+      "tavily",
+      "search_invalid_response",
+      "Search returned an unreadable response.",
+      { status: response.status },
+    );
+  }
   if (!body || typeof body !== "object" || !("results" in body))
-    throw new ProductError(503, "Search returned an unreadable response.");
+    throw researchFailure(
+      "tavily",
+      "search_invalid_response",
+      "Search returned an unreadable response.",
+      { status: response.status },
+    );
   if (!Array.isArray(body.results))
-    throw new ProductError(503, "Search returned an unreadable response.");
+    throw researchFailure(
+      "tavily",
+      "search_invalid_response",
+      "Search returned an unreadable response.",
+      { status: response.status },
+    );
   const results: PublicSearchResult[] = [];
   for (const row of body.results.slice(0, 5)) {
     if (
@@ -434,7 +537,7 @@ export function parseSearchLinks(html: string): PublicSearchResult[] {
   return results;
 }
 
-async function discoverPublicPages(
+export async function discoverDuckDuckGoPages(
   query: string,
   signal: AbortSignal | undefined,
   fetcher: Fetcher,
@@ -443,32 +546,50 @@ async function discoverPublicPages(
   // No authentication, challenge bypass, user-agent impersonation, or retry loop.
   const url = new URL("https://html.duckduckgo.com/html/");
   url.searchParams.set("q", query);
-  const response = await fetcher(url.href, {
+  const response = await researchFetch("duckduckgo", fetcher, url.href, {
     headers: {
       Accept: "text/html",
       "User-Agent": "Outpredict/1.0 (public source discovery)",
     },
-    redirect: "error",
+    redirect: "manual",
     signal: AbortSignal.any([
       AbortSignal.timeout(12_000),
       ...(signal ? [signal] : []),
     ]),
   });
-  if (!response.ok) {
-    await response.body?.cancel();
-    throw new ProductError(
-      503,
-      "Public source discovery is temporarily unavailable. Share an official URL or try again later.",
-      "search_unavailable",
+  if (response.status >= 300 && response.status < 400) {
+    await response.body?.cancel().catch(() => {});
+    throw researchFailure(
+      "duckduckgo",
+      "search_redirect",
+      `Public source discovery returned an unexpected redirect (HTTP ${response.status}). No current information was verified.`,
+      { status: response.status },
     );
   }
-  const html = await readBoundedText(response, 500_000);
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw researchFailure(
+      "duckduckgo",
+      "search_unavailable",
+      `Public source discovery returned HTTP ${response.status}. Share an official URL or try again later.`,
+      { status: response.status },
+    );
+  }
+  const html = await researchText("duckduckgo", response, 500_000);
+  if (/anomaly-modal|challenge-form|bots use DuckDuckGo/i.test(html))
+    throw researchFailure(
+      "duckduckgo",
+      "search_challenge",
+      "Public source discovery returned a verification challenge. No current information was verified.",
+      { status: response.status },
+    );
   const results = parseSearchLinks(html);
   if (!results.length && !/no results/i.test(html))
-    throw new ProductError(
-      503,
+    throw researchFailure(
+      "duckduckgo",
+      "search_unreadable",
       "Public source discovery could not complete. No current information was verified.",
-      "search_unavailable",
+      { status: response.status },
     );
   return results;
 }
@@ -493,12 +614,18 @@ export function extractHtmlText(html: string): { title: string; text: string } {
   return { title, text };
 }
 
-export async function fetchPublicPage(
+async function fetchPublicDocument(
   value: unknown,
   permittedUrls: ReadonlySet<string>,
   signal?: AbortSignal,
   fetcher: Fetcher = fetch,
-): Promise<{ title: string; url: string; text: string; truncated: boolean }> {
+): Promise<{
+  title: string;
+  url: string;
+  text: string;
+  truncated: boolean;
+  html: string | null;
+}> {
   let url = validatePublicUrl(value);
   if (!permittedUrls.has(url.href))
     throw new ProductError(
@@ -507,7 +634,7 @@ export async function fetchPublicPage(
     );
   const allowedHost = url.hostname;
   for (let attempt = 0; attempt < 4; attempt++) {
-    const response = await fetcher(url.href, {
+    const response = await researchFetch("publisher", fetcher, url.href, {
       redirect: "manual",
       headers: {
         Accept: "text/html,text/plain,application/xhtml+xml",
@@ -536,9 +663,13 @@ export async function fetchPublicPage(
     }
     if (!response.ok) {
       await response.body?.cancel();
-      throw new ProductError(
-        422,
-        "This source could not be read. Use another official source.",
+      throw researchFailure(
+        "publisher",
+        response.status === 404 || response.status === 410
+          ? "source_gone"
+          : "source_http_error",
+        `This source returned HTTP ${response.status} and could not be read. Use another official source.`,
+        { status: response.status },
       );
     }
     const type = response.headers.get("content-type") ?? "";
@@ -546,7 +677,7 @@ export async function fetchPublicPage(
       await response.body?.cancel();
       throw new ProductError(422, "The source is not a readable webpage.");
     }
-    const body = await readBoundedText(response);
+    const body = await researchText("publisher", response, 1_000_000);
     const extracted = /html/i.test(type)
       ? extractHtmlText(body)
       : { title: url.hostname, text: body };
@@ -560,9 +691,171 @@ export async function fetchPublicPage(
       url: url.href,
       text: extracted.text.slice(0, 16_000),
       truncated: extracted.text.length > 16_000,
+      html: /html/i.test(type) ? body : null,
     };
   }
   throw new ProductError(422, "The source redirected too many times.");
+}
+
+export async function fetchPublicPage(
+  value: unknown,
+  permittedUrls: ReadonlySet<string>,
+  signal?: AbortSignal,
+  fetcher: Fetcher = fetch,
+): Promise<{ title: string; url: string; text: string; truncated: boolean }> {
+  const { title, url, text, truncated } = await fetchPublicDocument(
+    value,
+    permittedUrls,
+    signal,
+    fetcher,
+  );
+  return { title, url, text, truncated };
+}
+
+/** Discover current links on a verified official entry page, not policy from memory. */
+export function parseOfficialLinks(
+  html: string,
+  from: string,
+  topic: string,
+): PublicSearchResult[] {
+  const base = validatePublicUrl(from);
+  const words = topic
+    .toLowerCase()
+    .split(/\W+/)
+    .filter(
+      (word) =>
+        word.length > 2 &&
+        !["and", "the", "for", "medical", "school"].includes(word),
+    );
+  if (/academic|prerequisite|requirements/.test(topic))
+    words.push("eligib", "prepar", "prereq", "require");
+  if (/deadline|timeline/.test(topic))
+    words.push("date", "deadline", "timeline");
+  const ranked = new Map<
+    string,
+    { result: PublicSearchResult; score: number }
+  >();
+  for (const match of html.matchAll(
+    /<a\b[^>]*\bhref=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi,
+  )) {
+    try {
+      const url = validatePublicUrl(
+        new URL(decodeEntities(match[1] ?? ""), base).href,
+      );
+      if (
+        url.hostname !== base.hostname ||
+        /\.(?:pdf|jpe?g|png|zip|docx?|xlsx?)$/i.test(url.pathname) ||
+        url.href === base.href
+      )
+        continue;
+      const title = decodeEntities((match[2] ?? "").replace(/<[^>]+>/g, " "))
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 200);
+      if (!title) continue;
+      const search = `${title} ${url.pathname}`.toLowerCase();
+      let score = words.reduce(
+        (total, word) => total + (search.includes(word) ? 5 : 0),
+        0,
+      );
+      if (/admission|apply|applicant/.test(search)) score += 3;
+      if (/residency|fellowship|postdoc|graduate-program|nursing/.test(search))
+        score -= 5;
+      if (score <= 0) continue;
+      const result: PublicSearchResult = {
+        title,
+        url: url.href,
+        content: "",
+        method: "official_site",
+        discoveredFrom: base.href,
+        discoveredAt: new Date().toISOString(),
+      };
+      if ((ranked.get(url.href)?.score ?? -Infinity) < score)
+        ranked.set(url.href, { result, score });
+    } catch {
+      /* Unsafe or non-web links never become fetch permissions. */
+    }
+  }
+  return [...ranked.values()]
+    .sort(
+      (a, b) => b.score - a.score || a.result.url.localeCompare(b.result.url),
+    )
+    .slice(0, 5)
+    .map((row) => row.result);
+}
+
+export async function discoverOfficialPages(
+  query: string,
+  signal?: AbortSignal,
+  fetcher: Fetcher = fetch,
+): Promise<PublicSearchResult[]> {
+  const entry = [...officialSiteDirectory]
+    .sort((a, b) => b.institution.length - a.institution.length)
+    .find((row) => query.startsWith(`${row.institution} `));
+  if (!entry)
+    throw new ProductError(
+      503,
+      "An official entry page is not yet verified for this institution. Share its official admissions URL so it can be read directly.",
+      "official_entry_unavailable",
+    );
+  const results = new Map<string, PublicSearchResult>();
+  const entryUrls = entry.urls.map((url) => validatePublicUrl(url).href);
+  let lastError: unknown;
+  for (const entryUrl of entryUrls.slice(0, 2)) {
+    try {
+      let page: Awaited<ReturnType<typeof fetchPublicDocument>>;
+      try {
+        page = await fetchPublicDocument(
+          entryUrl,
+          new Set(entryUrls),
+          signal,
+          fetcher,
+        );
+      } catch (error) {
+        const root = `${new URL(entryUrl).origin}/`;
+        if (
+          !(error instanceof ProductError) ||
+          error.code !== "source_gone" ||
+          root === entryUrl
+        )
+          throw error;
+        // A stale directory path permits one same-host root fallback, never a
+        // challenge/timeout retry or a manufactured cross-host destination.
+        page = await fetchPublicDocument(
+          root,
+          new Set([root]),
+          signal,
+          fetcher,
+        );
+      }
+      for (const result of parseOfficialLinks(
+        page.html ?? "",
+        page.url,
+        query.slice(entry.institution.length),
+      ).slice(0, 4))
+        results.set(result.url, result);
+      results.set(page.url, {
+        title: page.title,
+        url: page.url,
+        content: "",
+        method: "official_site",
+        discoveredFrom: page.url,
+        discoveredAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (!results.size)
+    throw (
+      lastError ??
+      new ProductError(
+        503,
+        "No readable official entry page was available.",
+        "official_entry_unavailable",
+      )
+    );
+  return [...results.values()].slice(0, 5);
 }
 
 export function webSource(

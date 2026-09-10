@@ -28,10 +28,20 @@ hours/week by the assumed number of weeks and can calculate a shortfall against
 the student's own plan. It never derives a target from corpus medians.
 Its `verifiedStatement` supplies readable, precomputed arithmetic; the answer
 uses that statement instead of inventing ratios or annualized estimates. A
-separate calendar note prevents treating a duration budget as proof that a
-deadline can be met. Source cards display these facts and retain inspectable JSON.
+calendar check automatically evaluates explicitly mentioned future month/year
+values in recent user messages and attachments against the current UTC date.
+It reports capacity by the start and through the end of that month, and any
+shortfall even at month end. These conditional bounds do not assume an exact
+submission deadline. A required-weeks result supports duration comparisons.
+Source cards display the computed facts and retain inspectable JSON.
 
-Answer text is streamed from actual model deltas. `reasoning` and
+Answer text is streamed from actual model deltas. An explicit request for one
+to eight sentences is a bounded exception: the short answer is buffered, checked,
+and, if necessary, repaired by one additional model call. A verified result is
+delivered as one delta; a failed check produces an error instead of an incomplete
+or incorrectly formatted successful answer. Writing instructions preserve only
+supplied autobiographical facts and prohibit invented duties, frequency, or impact.
+`reasoning` and
 `reasoning_content` are never forwarded or stored. Provider errors, timeouts,
 truncated outputs, and interrupted streams preserve partial text with an error
 state. An empty model answer is an error, not a successful response. Retrying and
@@ -92,8 +102,16 @@ evidence notes disclose it.
 ## Public information discovery
 
 When `TAVILY_API_KEY` is configured, the backend uses Tavily basic search.
-Otherwise it discovers publisher links through DuckDuckGo's public HTML surface.
-The latter is a limited fallback, not a contracted API or an availability promise.
+Otherwise it discovers live links on verified official institution entry pages.
+`data/official-sites.json` covers all 176 supported institution/application-system
+names, with provenance URLs and a directory-review date. This is scoped official
+site discovery, not a broad or exhaustive web search. The directory date verifies
+the entry link/host, not every current policy or the reachability of every deep
+path. Each search reads at most two entry pages, returns up to five leads, and
+can recover a 404/410 entry by reading that same verified host's root once.
+Other failures do not trigger that fallback. The publisher page must be read
+before policy claims or citations are added. Discovery and reading record actual
+observation dates. Directory-verified .org/.com hosts are classified as official.
 Blocked/challenge/unreadable responses fail clearly. There is no challenge
 bypass, browser impersonation, or repeated probing of blocked endpoints.
 
@@ -110,13 +128,22 @@ addresses, rejects private/local/numeric addresses and credentials, checks
 redirects, sends no user cookies, and caps response bytes and text length.
 Being on an `.edu` or `.gov` domain alone does not authorize an arbitrary URL.
 Search snippets are discovery leads; citations are added after reading the
-publisher's page. The app does not reproduce or embed DuckDuckGo result pages.
+publisher's page. Both credentialed API and publisher requests use manual
+redirect handling; API credentials are never forwarded through a redirect.
 
-On 2026-09-10 UTC, actual discovery and publisher retrieval succeeded for
-Stanford's MD academic-requirements page and UCLA's admissions page. The full
-agent chose search and page-reading tools and produced a cited Stanford answer.
-These checks used local-server outbound access plus real Cloudflare inference;
-staging/production egress and browser flows must also be verified at release.
+On 2026-09-10 UTC, local outbound discovery and publisher retrieval succeeded
+for Stanford and UCLA. A subsequent deployed test showed that DuckDuckGo did
+not respond from a Cloudflare Worker within 12 seconds; this was a timeout,
+not a confirmed verification challenge. That route is no longer the no-key
+runtime fallback. A separate temporary Cloudflare Worker successfully read
+Stanford, UCLA, AAMC, and LCME official pages using the real bounded reader;
+LCME's same-host redirect was handled successfully. Both temporary Workers
+were deleted. Full integrated staging research remains a release check.
+
+Research errors distinguish network/timeout, HTTP, redirect, challenge, body,
+and parse failures using sanitized categories without logging query text or
+secrets. When no official page is read, the assistant asks for an official URL
+or pasted policy text instead of substituting remembered requirements.
 
 Cloudflare's experimental Web Search previously returned `account_disabled`.
 Gemini 2.5 grounded queries previously returned unavailable-model errors, and
@@ -164,13 +191,21 @@ synthetic applicant documents and real reviewed public corpus records, never
 private user records. Credentials are loaded from ignored/secret stores and
 are not included in artifacts or logs.
 
-The final synthetic résumé/follow-up check completed in approximately 38 and
-34 seconds. The first answer correctly used 4 × 52 = 208 hours; the follow-up
-used 2 × 52 = 104 hours and the computed 96-hour shortfall against a 200-hour
-plan. Completed activity hours remained separate, the attachment citation stayed
-stable, and both answers asked for the submission date when the entry year
-conflicted with the proposed preparation year. This is a sampled live quality
-check, not a guarantee that every generated recommendation is correct.
+The final targeted synthetic résumé check completed in approximately 42 seconds.
+It reserved three hours for clinical activity and one for application work within
+the stated four-hour weekly budget, labeling this an illustrative, conditional
+allocation. It preserved completed hours, GPA, and MCAT with attachment citations,
+kept the planned 200 hours conditional, and correctly showed at most 168 available
+hours through the end of June 2027 from 2026-09-10. The preceding two-hour follow-up
+correctly computed 84 hours through month end and 100 weeks for a 200-hour plan.
+The final response redundantly asked to confirm the already-specified submission
+month/year; advice quality remains a sampled check, not a factual guarantee.
+
+A real two-sentence clinic rewrite initially produced one sentence, triggering
+the bounded format repair. The resulting two-sentence answer preserved the
+supplied clinic/appointment facts without adding frequency, duties, or outcomes.
+This check completed in approximately 30 seconds. No private user records were
+used in these model checks.
 
 - [Workers AI data usage](https://developers.cloudflare.com/workers-ai/platform/data-usage/)
 - [Markdown conversion binding](https://developers.cloudflare.com/workers-ai/features/markdown-conversion/usage/binding/)
@@ -178,6 +213,5 @@ check, not a guarantee that every generated recommendation is correct.
 - [GLM-5.3-Flash](https://developers.cloudflare.com/workers-ai/models/glm-5.3-flash/)
 - [Tavily search](https://docs.tavily.com/documentation/api-reference/endpoint/search)
 - [Tavily credits](https://docs.tavily.com/documentation/api-credits)
-- [DuckDuckGo HTML crawler rules](https://html.duckduckgo.com/robots.txt)
-- [DuckDuckGo terms](https://duckduckgo.com/terms)
-- [DuckDuckGo acceptable use](https://duckduckgo.com/acceptable-use)
+- [AAMC prerequisite directory](https://students-residents.aamc.org/medical-school-admission-requirements/required-premedical-coursework-and-competencies)
+- [LCME accredited programs](https://lcme.org/directory/accredited-programs/)

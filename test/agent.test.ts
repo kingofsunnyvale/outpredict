@@ -1,11 +1,14 @@
 import { env } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import corpus from "../data/corpus.json";
+import officialSites from "../data/official-sites.json";
 import {
   type AgentEvent,
   AgentFailure,
   calculate,
+  calendarTimeBudget,
   finalizeEvidence,
+  futureCalendarMonths,
   parseModelReply,
   parseStreamEvent,
   profileEvidence,
@@ -16,8 +19,12 @@ import type { CorpusProfile } from "../src/cohort";
 import type { Evidence } from "../src/product-types";
 import {
   buildPublicQuery,
+  discoverDuckDuckGoPages,
   extractHtmlText,
   fetchPublicPage,
+  isOfficialUrl,
+  PUBLIC_INSTITUTIONS,
+  parseOfficialLinks,
   parseSearchLinks,
   publicSearch,
   readBoundedText,
@@ -173,6 +180,7 @@ describe("model evidence and stream boundaries", () => {
       plannedHours: 200,
       additionalHoursNeeded: 96,
       fitsWithinTimeBudget: false,
+      requiredWeeksAtThisPace: 100,
     });
     expect(
       weeklyTimeBudget({ hoursPerWeek: 2, weeks: 52, plannedHours: 200 })
@@ -198,6 +206,24 @@ describe("model evidence and stream boundaries", () => {
       calculate({ operation: "sum", values: [Number.NaN] }),
     ).toThrow();
     expect(() => calculate({ operation: "sum", values: [] })).toThrow();
+  });
+
+  it("does not confuse 52 weeks with a June deadline", () => {
+    expect(
+      futureCalendarMonths(
+        "Completed May 2026. Planned by June 2027; applying 2027.",
+        "2026-09-10",
+      ),
+    ).toEqual(["2027-06"]);
+    expect(calendarTimeBudget(4, "2027-06", 200, "2026-09-10")).toMatchObject({
+      hoursByStartOfMonth: 150.86,
+      hoursThroughEndOfMonth: 168,
+      shortfallEvenAtMonthEnd: 32,
+    });
+    expect(calendarTimeBudget(2, "2027-06", 200, "2026-09-10")).toMatchObject({
+      hoursThroughEndOfMonth: 84,
+      shortfallEvenAtMonthEnd: 116,
+    });
   });
 
   it("answers a general question without forcing corpus or web tools", async () => {
@@ -420,7 +446,7 @@ describe("model evidence and stream boundaries", () => {
       messages: [
         {
           role: "assistant",
-          content: "An older deleted attachment was cited here [A12].",
+          content: "An older deleted attachment was cited here [A12, C8].",
           evidence: { sources: [] },
         },
         {
@@ -494,6 +520,147 @@ describe("model evidence and stream boundaries", () => {
     });
   });
 
+  it("repairs a requested two-sentence rewrite before exposing any draft text", async () => {
+    const requests: unknown[] = [];
+    const events: AgentEvent[] = [];
+    const answer =
+      "I volunteered at a clinic. I helped patients find their appointments.";
+    const result = await runAgent({
+      env: {
+        ...env,
+        AI: scriptedAI(
+          [
+            { choices: [{ message: { content: "READY" } }] },
+            stream([
+              {
+                choices: [
+                  {
+                    delta: {
+                      content:
+                        "I volunteered at a clinic and helped patients find their appointments.",
+                    },
+                  },
+                ],
+              },
+            ]),
+            { choices: [{ message: { content: answer } }] },
+          ],
+          requests,
+        ),
+      },
+      messages: [
+        {
+          role: "user",
+          content:
+            'Rewrite this in 2 sentences: "I volunteered at a clinic and helped patients find their appointments."',
+        },
+      ],
+      onEvent: async (event) => {
+        events.push(event);
+      },
+    });
+    expect(result.content).toBe(answer);
+    expect(events.filter((event) => event.type === "delta")).toEqual([
+      { type: "delta", text: answer },
+    ]);
+    expect(requests).toHaveLength(3);
+  });
+
+  it("reclassifies refreshed sources by the final URL without mutating profile evidence", async () => {
+    const from = "https://med.stanford.edu/md-admissions.html";
+    const to = "https://example.org/admissions";
+    const requests: unknown[] = [];
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (url) =>
+        String(url) === from
+          ? new Response(null, { status: 302, headers: { Location: to } })
+          : new Response(
+              "This is an independently published admissions discussion page with sufficient readable text for a bounded source request.",
+              { headers: { "Content-Type": "text/plain" } },
+            ),
+      );
+    try {
+      const result = await runAgent({
+        env: {
+          ...env,
+          AI: scriptedAI(
+            [
+              {
+                choices: [
+                  {
+                    message: {
+                      tool_calls: [
+                        {
+                          id: "refresh",
+                          type: "function",
+                          function: {
+                            name: "fetch_public_page",
+                            arguments: JSON.stringify({ url: from }),
+                          },
+                        },
+                      ],
+                    },
+                  },
+                ],
+              },
+              { choices: [{ message: { content: "READY" } }] },
+              stream([
+                {
+                  choices: [
+                    {
+                      delta: {
+                        content:
+                          "Current official requirements could not be verified.",
+                      },
+                    },
+                  ],
+                },
+              ]),
+            ],
+            requests,
+          ),
+        },
+        messages: [
+          {
+            role: "assistant",
+            content: "A previous source [W1].",
+            evidence: {
+              sources: [
+                {
+                  id: "P1",
+                  kind: "profile",
+                  title: "Profile",
+                  url: from,
+                  applicantId: "account",
+                },
+                {
+                  id: "W1",
+                  kind: "official",
+                  title: "Old official page",
+                  url: from,
+                },
+              ],
+            },
+          },
+          { role: "user", content: `Please refresh ${from} and ${to}` },
+        ],
+        onEvent: async () => {},
+      });
+      expect(
+        result.evidence.sources.find((source) => source.id === "W1"),
+      ).toMatchObject({ kind: "web", url: to });
+      expect(
+        result.evidence.sources.find((source) => source.id === "P1"),
+      ).toMatchObject({ kind: "profile", url: from });
+      expect(JSON.stringify(requests.at(-1))).toContain(
+        "No official page was successfully read",
+      );
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
   it("preserves partial answers on provider interruption and obeys lease cancellation", async () => {
     const partial = runAgent({
       env: {
@@ -549,6 +716,160 @@ describe("model evidence and stream boundaries", () => {
 });
 
 describe("bounded public research", () => {
+  it("has source-attributed public entry URLs for every supported institution", () => {
+    expect(officialSites.map((entry) => entry.institution).sort()).toEqual(
+      [...PUBLIC_INSTITUTIONS].sort(),
+    );
+    for (const entry of officialSites) {
+      expect(entry.urls.length).toBeGreaterThan(0);
+      expect(entry.sourceUrls.length).toBeGreaterThan(0);
+      expect(entry.verifiedAt).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      for (const url of entry.urls)
+        expect(isOfficialUrl(validatePublicUrl(url))).toBe(true);
+      for (const url of entry.sourceUrls)
+        expect(() => validatePublicUrl(url)).not.toThrow();
+    }
+  });
+  it("classifies network, redirect, challenge, and malformed-provider failures without logging private data", async () => {
+    const log = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await expect(
+        publicSearch(undefined, "Stanford admissions", undefined, async () => {
+          throw new TypeError("private-native-detail");
+        }),
+      ).rejects.toMatchObject({ code: "research_network_error" });
+      await expect(
+        discoverDuckDuckGoPages(
+          "Stanford admissions",
+          undefined,
+          async () =>
+            new Response(null, {
+              status: 302,
+              headers: { Location: "https://html.duckduckgo.com/html/" },
+            }),
+        ),
+      ).rejects.toMatchObject({ code: "search_redirect" });
+      await expect(
+        discoverDuckDuckGoPages(
+          "Stanford admissions",
+          undefined,
+          async () =>
+            new Response('<form id="challenge-form"></form>', { status: 202 }),
+        ),
+      ).rejects.toMatchObject({ code: "search_challenge" });
+      await expect(
+        publicSearch(
+          "private-api-key",
+          "Stanford admissions",
+          undefined,
+          async () => new Response("invalid json"),
+        ),
+      ).rejects.toMatchObject({ code: "search_invalid_response" });
+      expect(JSON.stringify(log.mock.calls)).not.toContain(
+        "private-native-detail",
+      );
+      expect(JSON.stringify(log.mock.calls)).not.toContain("private-api-key");
+      expect(JSON.stringify(log.mock.calls)).not.toContain(
+        "Stanford admissions",
+      );
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("constructs a supported Workers request with explicit manual redirect handling", async () => {
+    const results = await publicSearch(
+      undefined,
+      "Stanford admissions",
+      undefined,
+      async (input, init) => {
+        const request = new Request(input, init);
+        expect(request.redirect).toBe("manual");
+        return new Response(
+          "<title>MD Admissions</title><p>Review the official medical school admissions pages for detailed application information and current requirements.</p>",
+          { headers: { "Content-Type": "text/html" } },
+        );
+      },
+    );
+    expect(results[0]?.url).toBe("https://med.stanford.edu/md-admissions.html");
+  });
+
+  it("does not forward a Tavily credential through redirects", async () => {
+    const fetcher = vi.fn(
+      async (_url: RequestInfo | URL, init?: RequestInit) => {
+        expect(init?.redirect).toBe("manual");
+        return new Response(null, {
+          status: 302,
+          headers: { Location: "https://example.org/" },
+        });
+      },
+    );
+    await expect(
+      publicSearch("test-key", "Stanford admissions", undefined, fetcher),
+    ).rejects.toMatchObject({ code: "search_redirect" });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("ranks official same-host policy links and recovers stale directory paths only through their root", async () => {
+    const html =
+      '<title>Admissions</title><main><p>The current medical school admissions website provides application policies and academic preparation information for prospective students.</p><a href="/md-admissions/academic-requirements.html">Academic requirements</a><a href="https://example.org/requirements">External requirements</a><a href="https://localhost./">Admissions</a></main>';
+    const links = parseOfficialLinks(
+      html,
+      "https://med.stanford.edu/",
+      "academic requirements and prerequisites",
+    );
+    expect(links.map((link) => link.url)).toEqual([
+      "https://med.stanford.edu/md-admissions/academic-requirements.html",
+    ]);
+    const fetched: string[] = [];
+    const results = await publicSearch(
+      undefined,
+      "Stanford admissions academic requirements",
+      undefined,
+      async (input) => {
+        const url = String(input);
+        fetched.push(url);
+        return new URL(url).pathname === "/"
+          ? new Response(html, { headers: { "Content-Type": "text/html" } })
+          : new Response(null, { status: 404 });
+      },
+    );
+    expect(fetched).toContain("https://med.stanford.edu/");
+    expect(fetched.length).toBeLessThanOrEqual(4);
+    expect(results[0]).toMatchObject({
+      method: "official_site",
+      discoveredFrom: "https://med.stanford.edu/",
+      url: "https://med.stanford.edu/md-admissions/academic-requirements.html",
+    });
+    expect(isOfficialUrl(new URL("https://medschool.kp.org/admissions"))).toBe(
+      true,
+    );
+    const rejected = vi.fn(async () => new Response(null, { status: 403 }));
+    await expect(
+      publicSearch(undefined, "Stanford admissions", undefined, rejected),
+    ).rejects.toMatchObject({ code: "source_http_error" });
+    expect(rejected.mock.calls.length).toBeLessThanOrEqual(2);
+  });
+
+  it("rejects trailing-dot redirect targets before any second request", async () => {
+    const fetcher = vi.fn(
+      async () =>
+        new Response(null, {
+          status: 302,
+          headers: { Location: "https://metadata.google.internal./" },
+        }),
+    );
+    await expect(
+      fetchPublicPage(
+        "https://aamc.org/",
+        new Set(["https://aamc.org/"]),
+        undefined,
+        fetcher,
+      ),
+    ).rejects.toThrow("Only public");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
   it("constructs searches solely from public topics and rejects private names and forged URLs", async () => {
     expect(
       buildPublicQuery({
@@ -592,6 +913,11 @@ describe("bounded public research", () => {
       "https://stanford.edu:8443/",
       "https://metadata.google.internal/",
       "https://127.0.0.1.nip.io/",
+      "https://localhost./",
+      "https://metadata.google.internal./",
+      "https://127.0.0.1.nip.io./",
+      "https://127.0.0.1.sslip.io./",
+      "https://localtest.me./",
     ])
       expect(() => validatePublicUrl(url)).toThrow();
     expect(
