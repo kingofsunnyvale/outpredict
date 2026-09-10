@@ -29,5 +29,6 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: node scripts/validate-corpus.mjs
+      - run: node scripts/smoke-product.mjs --self-test
       - run: npm test
       - run: npm run build
