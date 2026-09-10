@@ -110,14 +110,16 @@ access in a future environment rather than assuming it inherits this machine's l
 
 ## Authentication configuration
 
-Setup checkpoint: the Google app identity and staging OAuth client exist and the
-staging auth migration has been applied. Local checks (11 tests, lint, typecheck,
-both dry-run builds, and dependency audit) were independently rechecked and passed
-on September 9. Desktop/mobile setup inspection passed in the earlier checkpoint.
-The staging client secret has not been saved in the local environment files;
-Google no longer reveals existing secrets. The production client form is prepared
-with the exact origin/callback below and awaits the browser-required confirmation.
-Actual Google login, staging deployment, and production release remain unverified.
+Setup checkpoint: separate production and staging-runtime OAuth clients were
+created, with credentials saved to ignored mode-0600 files and Cloudflare secrets.
+Independent auth secrets are preserved in each environment. The original staging
+client whose secret was not saved remains unused. OAuth branding has application,
+privacy, and terms links, and basic-identity login was published for external users.
+The auth migration has been applied to both environments. Staging branch deployment
+`7e731216-177f-4958-9b8c-20ceeb7fec89` successfully completed a real Google browser
+round trip on September 9. Local checks (11 auth tests, lint, typecheck, both builds,
+and zero-vulnerability dependency audit) were independently rechecked. Production
+release verification is still pending; check the linked OUT-6 issue/PR for updates.
 
 Google Cloud project: `outpredict-20260909` (number `930855311603`). Use an explicit
 `--project=outpredict-20260909` in Google CLI commands; the machine's default project

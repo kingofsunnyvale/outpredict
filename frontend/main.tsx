@@ -172,7 +172,9 @@ function App() {
       </main>
       <footer>
         <span>Outpredict</span>
-        <span>Built for your next step.</span>
+        <span>
+          <a href="/privacy">Privacy</a> · <a href="/terms">Using Outpredict</a>
+        </span>
       </footer>
     </div>
   );

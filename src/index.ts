@@ -1,4 +1,5 @@
 import { authIsConfigured, createAuth } from "./auth";
+import { publicPage } from "./public-pages";
 
 function json(data: unknown, status = 200, headers = new Headers()): Response {
   headers.set("Cache-Control", "no-store");
@@ -19,6 +20,11 @@ const authRoutes = new Map([
 export default {
   async fetch(request, env): Promise<Response> {
     const { pathname, origin } = new URL(request.url);
+
+    if (request.method === "GET") {
+      const page = publicPage(pathname);
+      if (page) return page;
+    }
 
     if (request.method === "GET" && pathname === "/healthz") {
       return json({
