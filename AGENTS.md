@@ -29,6 +29,10 @@ Free, data-driven medical-school admissions advice for students.
 
 - Keep staging and production resources separate. Test migrations and backfills
   in staging before production; do not modify AnyWager's resources.
+- Label schema, ingestion, storage-format, and shared-state changes `backend-state`.
+  Deploy that issue's branch with `npm run deploy:staging` and verify it before
+  merging. Staging is shared: coordinate simultaneous branches and link the tested
+  commit/deployment in Linear. The label does not provision a backend automatically.
 - Store credentials in ignored local files or secret stores, never in Git,
   command output, Linear issues, or PR descriptions.
 - Once merge-to-main deployment is configured, a merge is a release: check its

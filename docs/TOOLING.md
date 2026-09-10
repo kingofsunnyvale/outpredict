@@ -16,7 +16,8 @@ and applicant data collection are separate future work.
 - The existing Linear Code GitHub App is installed specifically for this repository.
   Use the issue-generated `username/identifier-title` branch and `Fixes OUT-<number>`
   in the PR body. Public GitHub comments and GitHub issue duplication are disabled;
-  native PR linking is separate from those settings. Team automation is PR open →
+  native PR linking is separate from those settings. PR #1 attached automatically
+  to OUT-5; no manual attachment was added. Team automation is PR open →
   In Progress, review activity → In Review, and PR merge → Done. Verify deployment
   separately; reopen/update the issue if a release fails.
 
@@ -36,11 +37,16 @@ npm run deploy:production
 ```
 
 `dev` uses local emulated staging bindings. `build` bundles both environments without
-publishing. `cf-typegen` regenerates `worker-configuration.d.ts` after binding changes.
+publishing. Label state/schema/ingestion changes `backend-state` and deploy the issue
+branch to staging before merge. Staging is shared between branches; record the tested
+commit in Linear. Labels do not create environments. `cf-typegen` regenerates `worker-configuration.d.ts` after binding changes.
 Dependencies and the lockfile are pinned. The scoped Sharp override fixes a vulnerable
 transitive Miniflare dependency; remove it once upstream includes the fixed version.
 Clean install, zero-vulnerability npm audit, lint, typecheck, both dry-runs, and local
 HTTP checks passed. GitHub Actions runs install, lint, typecheck, and build for PRs/main.
+The setup PR passed its first CI run. Main requires the GitHub Actions `checks` status,
+up-to-date branches, a PR, and resolved conversations, including for admins. There is
+no required human review, so an authorized agent can merge after checking the diff.
 
 ## Cloudflare resources
 
@@ -57,7 +63,19 @@ completed. Both databases passed remote create/insert/read/drop checks, and both
 buckets passed upload/download/compare/delete checks; temporary artifacts were removed.
 Buckets are private. AnyWager resources are separate and were not modified.
 
-Deployment and GitHub CI verification are in progress in OUT-5.
+Both Workers were deployed successfully using Wrangler; their `/healthz` routes
+returned HTTP 200 with the correct environment. The shared account subdomain is
+`anywager.workers.dev`; the Worker and storage resources themselves are separate.
+
+Cloudflare Workers Builds is connected to `kingofsunnyvale/outpredict` for both
+Workers, using the existing Cloudflare-managed build token (no token was copied
+into this repository or GitHub). Build runtime is Node 24.20.0. The build command
+runs lint, typecheck, and build; the environment-specific npm deploy command runs
+on `main`. Production branch previews are disabled. Other branches upload preview
+versions with `npx wrangler versions upload --env staging`; these share staging
+D1/R2, so coordinate state-changing tests between branches.
+
+Automatic preview and merge deployment verification is in progress in OUT-5.
 
 ## Other verified capabilities and deferred work
 
