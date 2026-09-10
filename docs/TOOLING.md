@@ -81,6 +81,15 @@ Cloudflare account: `8b1ada8b10e9e8e5664ec10bd9d3c370`. Project-local Wrangler i
 The shared hostname ends in `anywager.workers.dev`; Outpredict resources are
 separate. Do not modify AnyWager resources. Initial D1/R2 CRUD checks passed.
 
+The canonical production origin is `https://outpredict.app`, a managed Worker
+custom domain in zone `b18c8480dd80a0ebce8e060dd440272f`. Staging keeps its
+`workers.dev` origin. The legacy production homepage redirects safe GET/HEAD
+navigation to the canonical homepage, dropping query parameters. Private API
+requests are never redirected or proxied; sign in again on the new domain to
+access the same account and saved conversations. Legacy health checks stay usable.
+The domain is bound and TLS verified before switching the configured auth origin.
+Do not override an existing DNS record or another Worker's domain binding.
+
 Workers Builds connects both Workers to GitHub with a Cloudflare-managed token.
 Main merges trigger deployment; production branch previews are disabled. Staging
 versions share staging D1/R2. Use the stable staging origin for authentication;
@@ -117,7 +126,12 @@ sign-in and sign-out flows when verifying the final OUT-10 interface.
 |---|---|---|
 | Local | `http://localhost:8787` | `http://localhost:8787/api/auth/callback/google` |
 | Staging | `https://outpredict-staging.anywager.workers.dev` | `https://outpredict-staging.anywager.workers.dev/api/auth/callback/google` |
-| Production | `https://outpredict.anywager.workers.dev` | `https://outpredict.anywager.workers.dev/api/auth/callback/google` |
+| Production | `https://outpredict.app` | `https://outpredict.app/api/auth/callback/google` |
+
+The production Google client retains its previous `workers.dev` origin/callback
+for rollback and also includes `outpredict.app`; the latter is an authorized
+OAuth domain. Public branding links use the canonical homepage, `/privacy`, and
+`/terms` after HTTPS verification. Staging uses its separate client throughout.
 
 Worker secrets are `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`,
 `BETTER_AUTH_SECRET`, and `OPENAI_API_KEY`. Auth copies are ignored mode-0600 `.env.auth-staging.json`
@@ -228,4 +242,4 @@ interface deployment and browser evidence is recorded with OUT-10.
 | OUT-8 | [PR #5](https://github.com/kingofsunnyvale/outpredict/pull/5), merge `c44b89be46dd4f21d0028ff86aa532ee34bd3ec6`; private storage APIs and synthetic cleanup verified in both environments. |
 | OUT-9 | [PR #6](https://github.com/kingofsunnyvale/outpredict/pull/6), merge `420a509a2a2592df188af482825a7758288302c9`; 72 tests and required checks pass. Staging branch `58c3f3a` / version `5dcccc68-a195-42c2-be33-0dbca3c9a97f` passed real-agent and private-storage smoke. Automatic main deployments passed: staging `55e674ec-ea98-4041-afcd-09b57483ad29`, production `fe0d16b6-e58e-4607-8518-958187f5c5fc`. Production smoke and manual answer review passed: 58 matching, 12 retrieved, two cited supporting accounts, saved evidence/calculations consistent, exact synthetic cleanup complete. |
 | OUT-10 | [PR #7](https://github.com/kingofsunnyvale/outpredict/pull/7), merge `46e5765e494a1c4a3377861141adb5f5afd71e98`; 72 tests and required checks pass. Exact branch `ad6ab18` passed staging at `b62b91f1-b6d5-4cf9-a5c3-bf73842015ca`: Google draft, PDF plan/follow-up, profile/evidence inspection, saved history and mobile. Automatic main staging `797045dd-d1f9-42a3-b461-3276525eda52` and production `a578b61e-4afc-42cd-bbbe-18431e39dfdb` passed. Production Google draft and saved conversation confirmed. Model answer-quality corrections and final domain flows continue in OUT-12/13. |
-| OUT-12 | OpenAI migration: 90 tests, lint, typecheck and both builds pass; exact-model API and sampled synthetic answer checks pass. Branch staging and production release evidence will be recorded after deployment. |
+| OUT-12 | [PR #8](https://github.com/kingofsunnyvale/outpredict/pull/8), merge `0261fe43b842a9b045fe0e628c811e57fbf50690`; 90 tests, lint, typecheck, both builds and required CI pass. Exact branch `afbec405` passed staging `80edf5f0-1aa6-4949-b545-208388c6cea6`, including the browser résumé/time-budget follow-up. Automatic main staging `ce9779c1-5cd9-46ed-8e54-9bd7f4eefabc` and production `23b2ccfd-af34-41c6-bdb5-4f706b231ef8` passed. Real production agent/storage/cancellation/replay/deletion smoke and manual answer review passed: 58 matched, 2 retrieved, 2 cited accounts with accurate publication and missing-hours distinctions; exact synthetic cleanup complete. |

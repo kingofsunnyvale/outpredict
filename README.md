@@ -1,7 +1,7 @@
 # Outpredict
 Free, data-driven medical-school admissions advice.
 
-[Open Outpredict](https://outpredict.anywager.workers.dev) ·
+[Open Outpredict](https://outpredict.app) ·
 [Staging](https://outpredict-staging.anywager.workers.dev)
 
 Sign in with Google and ask a question. Attach a résumé or image when helpful,

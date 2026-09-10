@@ -3,6 +3,7 @@ import { handleChatApi } from "./chat-api";
 import { handleChatStream } from "./chat-stream";
 import { getCorpusStats, inspectProfile } from "./cohort";
 import { publicPage } from "./public-pages";
+import { canonicalHomepage } from "./site-routing";
 
 function json(data: unknown, status = 200, headers = new Headers()): Response {
   headers.set("Cache-Control", "no-store");
@@ -22,6 +23,8 @@ const authRoutes = new Map([
 
 export default {
   async fetch(request, env, ctx): Promise<Response> {
+    const redirect = canonicalHomepage(request, env);
+    if (redirect) return redirect;
     const { pathname, origin } = new URL(request.url);
 
     if (request.method === "GET") {
