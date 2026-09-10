@@ -72,6 +72,15 @@ identities are not merged by inference.
 - Reported outcomes: matching accounts with an explicit, unconditional,
   same-cycle acceptance or rejection. Interviews/waitlists remain separate states.
 
+The model receives separate available, matching, retrieved, and numeric-summary
+population fields. Supporting is defined only as distinct retrieved source
+accounts cited in the final answer; it is never the numeric-summary population
+or a statistic's sample size. The backend appends an **Evidence counts** statement
+after final citations are known and saves the same values in its calculation
+record. The model is instructed to leave this summary to the application. Explicit
+sentence-count or recognized word/character/line/bullet limits use the evidence
+panel instead of an added count statement.
+
 Deterministic numeric summaries can use up to 1,000 matching accounts, separately
 from the smaller retrieved sample. Each statistic records its own included and
 excluded counts. Hours exclude ranges, estimates, projections, mixed-cycle
@@ -84,7 +93,12 @@ inspection and `applicantId` for deduplication. A conditional offer for a later
 cycle is excluded from the current-cycle profile evidence given to the model.
 The original reviewed record remains auditable through profile inspection.
 Mixed-timing activity totals are also withheld from the model's cycle snapshot
-because the amount completed before that application is unknown.
+because the amount completed before that application is unknown. Narrative-only
+categories such as publications retain their exact reported text and reporting
+status without a misleading null hour measurement. A report of no publications
+with a thesis/poster is distinct from unreported publications; anticipated
+manuscripts are not treated as completed publications. Null hours for an activity
+do not mean the activity itself was unreported.
 
 Follow-ups retain bounded historical source context without claiming a new
 corpus query. Profile, calculation, and attachment citation numbers are not
@@ -158,6 +172,15 @@ included a webpage URL. The answer correctly said it could not open the page or
 verify current/upcoming policy from student reports, made no requirements claims,
 and returned no sources. It completed in approximately eight seconds without an
 outside research tool call.
+
+A live two-applicant comparison completed in approximately 27 seconds after the
+count/narrative changes. It correctly distinguished the two cited supporting
+accounts from the 58-account numeric-summary population. The saved calculation
+record and cohort panel agreed on 58 available, 58 matching, two retrieved, and
+two supporting accounts. The answer preserved the first applicant's report of
+no publications while distinguishing their thesis/poster and upcoming manuscripts.
+The requested short word limit suppressed the extra count statement; precise
+word-limit compliance remains model-enforced rather than a guaranteed formatter.
 
 The final targeted synthetic résumé check completed in approximately 42 seconds.
 It reserved three hours for clinical activity and one for application work within

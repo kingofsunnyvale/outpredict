@@ -6,8 +6,11 @@ import {
   AgentFailure,
   calculate,
   calendarTimeBudget,
+  cohortCountEvidence,
+  evidenceCountStatement,
   finalizeEvidence,
   futureCalendarMonths,
+  hasExplicitLengthLimit,
   parseModelReply,
   parseStreamEvent,
   profileEvidence,
@@ -71,6 +74,100 @@ describe("model evidence and stream boundaries", () => {
       cycleHours: null,
     });
   });
+  it("preserves publication reports without presenting missing hours as missing publications", () => {
+    const first = profileEvidence(
+      corpus.profiles.find(
+        (profile) => profile.id === "reddit-bat-sharp-2025-26",
+      ) as CorpusProfile,
+    );
+    const second = profileEvidence(
+      corpus.profiles.find(
+        (profile) => profile.id === "reddit-beepbeepboopb0p-2025-26",
+      ) as CorpusProfile,
+    );
+    const publication = first.activities.find(
+      (activity) => activity.category === "publications",
+    );
+    expect(publication).toMatchObject({
+      measurementType: "narrative_not_hours",
+      reportingStatus: "reported_text",
+    });
+    expect(publication).not.toHaveProperty("hours");
+    expect(publication).toHaveProperty(
+      "reportedText",
+      "None, just my undergrad thesis and poster. Mentioned in letters to schools though that the work I did as a tech will be included in upcoming manuscripts to be published late 2026/early 2027",
+    );
+    expect(
+      second.activities.find(
+        (activity) => activity.category === "publications",
+      ),
+    ).toMatchObject({ reportedText: "2", reportingStatus: "reported_text" });
+    expect(
+      first.activities.find((activity) => activity.category === "nonclinical"),
+    ).toMatchObject({
+      reportingStatus: "reported_text",
+      hours: { precision: "unreported" },
+    });
+  });
+
+  it("leaves count receipts to the panel when an explicit short length is requested", () => {
+    expect(
+      hasExplicitLengthLimit("Compare two applicants in under 20 words."),
+    ).toBe(true);
+    expect(hasExplicitLengthLimit("Give a 100-word summary.")).toBe(true);
+    expect(hasExplicitLengthLimit("Use no more than 300 characters.")).toBe(
+      true,
+    );
+    expect(hasExplicitLengthLimit('Discuss this text: "in 20 words".')).toBe(
+      false,
+    );
+    expect(hasExplicitLengthLimit("Compare two applicants.")).toBe(false);
+  });
+
+  it("separates numeric summary population from actual cited-account support", () => {
+    const counts = cohortCountEvidence({
+      total: 58,
+      matched: 58,
+      examined: 2,
+      withReportedOutcomes: 58,
+      summarized: 58,
+    });
+    expect(counts).toMatchObject({
+      availableApplicants: 58,
+      matchingApplicants: 58,
+      retrievedApplicants: 2,
+      numericSummaryPopulation: 58,
+      supportingApplicants: null,
+      maximumPossibleSupportingApplicants: 2,
+    });
+    expect(counts).not.toHaveProperty("summarized");
+    const evidence = finalizeEvidence(
+      {
+        sources: [
+          { id: "P1", kind: "profile", title: "First", applicantId: "first" },
+          { id: "P2", kind: "profile", title: "Second", applicantId: "second" },
+        ],
+        cohort: {
+          totalProfiles: 58,
+          matchedProfiles: 58,
+          examinedProfiles: 2,
+          supportingProfiles: 0,
+          profilesWithOutcomes: 58,
+          filters: {},
+          limitations: [],
+        },
+      },
+      "One cited profile [P1].",
+    );
+    const statement = evidenceCountStatement(evidence, 58);
+    expect(statement).toContain(
+      "58 available; 58 matching; 2 retrieved; 1 supporting this answer",
+    );
+    expect(statement).toContain(
+      "Numeric summaries consider 58 matching accounts",
+    );
+  });
+
   it("strips reasoning, preserves UTF-8 answer text, and detects incomplete streams", () => {
     expect(
       parseStreamEvent(
@@ -406,6 +503,30 @@ describe("model evidence and stream boundaries", () => {
         .map((source) => source.id),
     ).toEqual(["P1", "P2"]);
     expect(result.evidence.notes?.join(" ")).toContain("latest search filters");
+    expect(result.content).toContain(
+      "2 available; 1 matching; 1 retrieved; 1 supporting this answer",
+    );
+    const calculation = result.evidence.sources.find(
+      (source) => source.id === "C2",
+    );
+    expect(JSON.parse(calculation?.excerpt ?? "{}").counts).toMatchObject({
+      numericSummaryPopulation: 1,
+      supportingApplicants: 1,
+    });
+    const inference = requests[2] as {
+      messages: Array<{ role: string; content?: string }>;
+    };
+    const toolData = JSON.parse(
+      inference.messages.filter((message) => message.role === "tool").at(-1)
+        ?.content ?? "{}",
+    );
+    expect(toolData.counts).toMatchObject({
+      availableApplicants: 2,
+      matchingApplicants: 1,
+      retrievedApplicants: 1,
+      numericSummaryPopulation: 1,
+      supportingApplicants: null,
+    });
     expect(requests).toHaveLength(5);
   });
 
