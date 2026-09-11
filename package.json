@@ -10,13 +10,15 @@
   "scripts": {
     "dev": "wrangler dev --env staging --var AUTH_URL:http://localhost:8787 --port 8787",
     "cf-typegen": "wrangler types",
-    "lint": "biome check src frontend test vite.config.ts vitest.config.ts package.json biome.json tsconfig*.json wrangler.jsonc",
+    "lint": "biome check src frontend test scripts/import-corpus.mjs scripts/validate-corpus.mjs scripts/corpus-artifacts.mjs scripts/prepare-corpus-artifacts.mjs scripts/corpus-pipeline.test.mjs scripts/smoke-product.mjs vite.config.ts vitest.config.ts package.json biome.json tsconfig*.json wrangler.jsonc",
     "typecheck": "wrangler types --check && tsc --noEmit && tsc --noEmit -p tsconfig.frontend.json && tsc --noEmit -p tsconfig.test.json",
     "build": "wrangler deploy --dry-run --env staging --outdir dist/staging && wrangler deploy --dry-run --env production --outdir dist/production",
     "deploy:staging": "wrangler deploy --env staging",
     "deploy:production": "wrangler deploy --env production",
     "build:client": "vite build",
     "test": "npm run build:client && vitest run",
+    "test:corpus-pipeline": "node --test scripts/corpus-pipeline.test.mjs",
+    "test:collection": "PYTHONDONTWRITEBYTECODE=1 uv run --no-project --python 3.13.5 python -m unittest discover -s scripts/collection -p 'test_*.py'",
     "db:migrate:local": "wrangler d1 migrations apply DB --env staging --local",
     "db:migrate:staging": "wrangler d1 migrations apply DB --env staging --remote",
     "db:migrate:production": "wrangler d1 migrations apply DB --env production --remote"

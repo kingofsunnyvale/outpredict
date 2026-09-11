@@ -1,3 +1,5 @@
+import type { CorpusCoverageStats } from "./product-types";
+
 export const OUTCOMES = [
   "accepted",
   "rejected",
@@ -8,6 +10,17 @@ export const OUTCOMES = [
   "unknown",
 ] as const;
 export const CORPUS_SOURCES = ["reddit", "sdn", "mdapplicants"] as const;
+export const MEDICAL_PROGRAMS = [
+  "MD",
+  "DO",
+  "MD-PhD",
+  "MD_PhD",
+  "unknown",
+  "unspecified_medical",
+] as const;
+export function isMedicalProgram(program: string): boolean {
+  return (MEDICAL_PROGRAMS as readonly string[]).includes(program);
+}
 export type OutcomeStatus = (typeof OUTCOMES)[number];
 export type CorpusSource = (typeof CORPUS_SOURCES)[number];
 export interface Measurement {
@@ -52,6 +65,32 @@ export interface CorpusProfile {
   mcat: number | null;
   residence: string | null;
   summary: string;
+  evidenceTier?: "reviewed_outcome_report" | "reviewed_profile";
+  reviewMethod?: string;
+  missingFields?: string[];
+  unavailableNumericFields?: string[];
+  academicMeasurements?: Partial<
+    Record<"gpa" | "scienceGpa" | "mcat", Measurement>
+  >;
+  evidenceSpans?: {
+    field: string;
+    postId: string;
+    sourceUrl: string;
+    sourceArtifactSha256: string;
+    start: number;
+    end: number;
+    quote: string;
+  }[];
+  sourceSnapshotAt?: string | null;
+  humanReviewed?: boolean;
+  categoryHourTotals?: Record<
+    string,
+    {
+      hours: Measurement;
+      eligibility: "reviewed_complete_nonoverlapping";
+      timing: "application_cycle" | "source_snapshot";
+    }
+  >;
   activities: CorpusActivity[];
   outcomes: CorpusOutcome[];
   sourceUrls: string[];
@@ -95,6 +134,13 @@ export interface CohortResult {
     matched: number;
     examined: number;
     withReportedOutcomes: number;
+    withAnyReportedOutcomes: number;
+    withoutReportedOutcomes: number;
+    withKnownCycle: number;
+    withReportedGpa: number;
+    withReportedMcat: number;
+    withUsableGpa: number;
+    withUsableMcat: number;
     summarized: number;
   };
   filters: CohortFilters;
@@ -169,13 +215,7 @@ export function validateCohortFilters(input: unknown): CohortFilters {
     )
       throw new Error(`Invalid ${key}.`);
     if (key === "cycles") {
-      if (
-        list.some(
-          (cycle) =>
-            !/^20\d{2}-\d{2}$/.test(cycle) ||
-            Number(cycle.slice(5)) !== (Number(cycle.slice(0, 4)) + 1) % 100,
-        )
-      )
+      if (list.some((cycle) => cycle !== "unknown" && !isKnownCycle(cycle)))
         throw new Error("Invalid application cycle.");
       filters.cycles = [...new Set<string>(list)];
     } else if (key === "sources") {
@@ -221,6 +261,83 @@ export function numericSummary(values: (number | null)[]): NumericSummary {
 
 const BASE = "p.is_current=1 AND p.review_status='reviewed'";
 const DISTINCT_MATCH = "SELECT * FROM candidates WHERE applicant_row=1";
+const SNAPSHOT_ORDER =
+  "CASE WHEN p.cycle='unknown' THEN 1 ELSE 0 END,p.cycle DESC,p.observed_at DESC,p.id";
+const MATCH_ORDER = "CASE WHEN cycle='unknown' THEN 1 ELSE 0 END,cycle DESC,id";
+const MEDICAL_PROGRAM_SQL = `o.program IN (${MEDICAL_PROGRAMS.map((program) => `'${program}'`).join(",")})`;
+const ACTUAL_AR = `o.conditional=0 AND o.status IN ('accepted','rejected') AND ${MEDICAL_PROGRAM_SQL}`;
+const KNOWN_CYCLE = "cycle<>'unknown' AND cycle GLOB '20[0-9][0-9]-[0-9][0-9]'";
+
+function usableAcademic(key: "gpa" | "scienceGpa" | "mcat", prefix = "") {
+  const column = key === "scienceGpa" ? "science_gpa" : key;
+  return `${prefix}${column} IS NOT NULL AND COALESCE(json_extract(${prefix}profile_json,'$.academicMeasurements.${key}.precision'),'reported')='reported'`;
+}
+function reportedAcademic(key: "gpa" | "scienceGpa" | "mcat", prefix = "") {
+  const column = key === "scienceGpa" ? "science_gpa" : key;
+  return `(${prefix}${column} IS NOT NULL OR (json_extract(${prefix}profile_json,'$.academicMeasurements.${key}.precision') IN ('reported','approximate','range','lower_bound','upper_bound') AND (json_extract(${prefix}profile_json,'$.academicMeasurements.${key}.min') IS NOT NULL OR json_extract(${prefix}profile_json,'$.academicMeasurements.${key}.max') IS NOT NULL)))`;
+}
+export function exactAcademic(
+  profile: CorpusProfile,
+  key: "gpa" | "scienceGpa" | "mcat",
+): number | null {
+  const measurement = profile.academicMeasurements?.[key];
+  return measurement && measurement.precision !== "reported"
+    ? null
+    : profile[key];
+}
+
+export function isKnownCycle(cycle: string): boolean {
+  return (
+    /^20\d{2}-\d{2}$/.test(cycle) &&
+    Number(cycle.slice(5)) === (Number(cycle.slice(0, 4)) + 1) % 100
+  );
+}
+
+function categoryHours(
+  row: {
+    activities_json: string;
+    timing_status: string;
+    evidence_tier: string | null;
+    category_totals_json: string | null;
+  },
+  category: string,
+): number | null {
+  if (!["cycle_report", "source_snapshot"].includes(row.timing_status))
+    return null;
+  if (row.evidence_tier) {
+    const totals = JSON.parse(
+      row.category_totals_json ?? "{}",
+    ) as CorpusProfile["categoryHourTotals"];
+    const total = totals?.[category];
+    if (
+      total?.eligibility !== "reviewed_complete_nonoverlapping" ||
+      (row.timing_status === "cycle_report"
+        ? total.timing !== "application_cycle"
+        : total.timing !== "source_snapshot")
+    )
+      return null;
+    const h = total.hours;
+    return ["reported", "explicit_absence"].includes(h.precision) &&
+      h.min !== null &&
+      h.min === h.max
+      ? h.min
+      : null;
+  }
+  // Legacy reviewed records contain category aggregates. Do not choose the first
+  // row if a later release accidentally supplies separate roles without v2 metadata.
+  const activities = (
+    JSON.parse(row.activities_json) as CorpusActivity[]
+  ).filter((a) => a.category === category);
+  const activity = activities[0];
+  if (
+    activities.length !== 1 ||
+    !activity ||
+    activity.timing !== "cycle_report" ||
+    !["reported", "explicit_absence"].includes(activity.hours.precision)
+  )
+    return null;
+  return activity.hours.min === activity.hours.max ? activity.hours.min : null;
+}
 export async function searchCohort(
   db: D1Database,
   input: unknown,
@@ -238,8 +355,10 @@ export async function searchCohort(
     ["mcatMin", "mcat", ">="],
     ["mcatMax", "mcat", "<="],
   ] as const) {
-    if (filters[key] !== undefined)
+    if (filters[key] !== undefined) {
       clauses.push(`p.${column}${operator}${parameter(filters[key])}`);
+      clauses.push(usableAcademic(column, "p."));
+    }
   }
   for (const [list, column] of [
     [filters.cycles, "p.cycle"],
@@ -254,6 +373,7 @@ export async function searchCohort(
       "o.profile_id=p.id",
       "o.cycle=p.cycle",
       "o.conditional=0",
+      MEDICAL_PROGRAM_SQL,
     ];
     if (filters.outcomes)
       outcomeClauses.push(
@@ -273,7 +393,7 @@ export async function searchCohort(
     clauses.push(
       `p.activities_json LIKE ${parameter(literalLike(filters.activity))} ESCAPE '\\'`,
     );
-  const cte = `WITH candidates AS (SELECT p.*,a.source,ROW_NUMBER() OVER(PARTITION BY p.account_id ORDER BY p.cycle DESC,p.observed_at DESC,p.id) AS applicant_row FROM corpus_profiles p JOIN corpus_accounts a ON a.id=p.account_id WHERE ${clauses.join(" AND ")}), matched AS (${DISTINCT_MATCH})`;
+  const cte = `WITH candidates AS (SELECT p.*,a.source,ROW_NUMBER() OVER(PARTITION BY p.account_id ORDER BY ${SNAPSHOT_ORDER}) AS applicant_row FROM corpus_profiles p JOIN corpus_accounts a ON a.id=p.account_id WHERE ${clauses.join(" AND ")}), matched AS (${DISTINCT_MATCH})`;
   const bind = (sql: string) => db.prepare(`${cte} ${sql}`).bind(...args);
   const [totalRow, countRow, profileRows, summaryRows, sourceRows, cycleRows] =
     await Promise.all([
@@ -283,18 +403,36 @@ export async function searchCohort(
         )
         .first<{ n: number }>(),
       bind(
-        "SELECT COUNT(*) AS n, SUM(CASE WHEN EXISTS(SELECT 1 FROM corpus_outcomes o WHERE o.profile_id=matched.id AND o.cycle=matched.cycle AND o.conditional=0 AND o.status IN ('accepted','rejected')) THEN 1 ELSE 0 END) AS outcome_n FROM matched",
-      ).first<{ n: number; outcome_n: number | null }>(),
+        `SELECT COUNT(*) AS n,
+          SUM(CASE WHEN ${KNOWN_CYCLE} AND EXISTS(SELECT 1 FROM corpus_outcomes o WHERE o.profile_id=matched.id AND o.cycle=matched.cycle AND ${ACTUAL_AR}) THEN 1 ELSE 0 END) AS outcome_n,
+          SUM(CASE WHEN EXISTS(SELECT 1 FROM corpus_outcomes o WHERE o.profile_id=matched.id AND ${ACTUAL_AR}) THEN 1 ELSE 0 END) AS any_outcome_n,
+          SUM(CASE WHEN ${KNOWN_CYCLE} THEN 1 ELSE 0 END) AS known_cycle_n,
+          SUM(CASE WHEN ${reportedAcademic("gpa")} THEN 1 ELSE 0 END) AS gpa_n,
+          SUM(CASE WHEN ${reportedAcademic("mcat")} THEN 1 ELSE 0 END) AS mcat_n,
+          SUM(CASE WHEN ${usableAcademic("gpa")} THEN 1 ELSE 0 END) AS usable_gpa_n,
+          SUM(CASE WHEN ${usableAcademic("mcat")} THEN 1 ELSE 0 END) AS usable_mcat_n FROM matched`,
+      ).first<{
+        n: number;
+        outcome_n: number | null;
+        any_outcome_n: number | null;
+        known_cycle_n: number | null;
+        gpa_n: number;
+        mcat_n: number;
+        usable_gpa_n: number | null;
+        usable_mcat_n: number | null;
+      }>(),
       bind(
-        `SELECT profile_json FROM matched ORDER BY cycle DESC,id LIMIT ${filters.limit}`,
+        `SELECT profile_json FROM matched ORDER BY ${MATCH_ORDER} LIMIT ${filters.limit}`,
       ).all<{ profile_json: string }>(),
       bind(
-        "SELECT gpa,mcat,activities_json,timing_status FROM matched ORDER BY cycle DESC,id LIMIT 1000",
+        `SELECT CASE WHEN ${usableAcademic("gpa")} THEN gpa ELSE NULL END AS gpa,CASE WHEN ${usableAcademic("mcat")} THEN mcat ELSE NULL END AS mcat,activities_json,timing_status,json_extract(profile_json,'$.evidenceTier') AS evidence_tier,json_extract(profile_json,'$.categoryHourTotals') AS category_totals_json FROM matched ORDER BY ${MATCH_ORDER} LIMIT 1000`,
       ).all<{
         gpa: number | null;
         mcat: number | null;
         activities_json: string;
         timing_status: string;
+        evidence_tier: string | null;
+        category_totals_json: string | null;
       }>(),
       bind(
         "SELECT source AS value,COUNT(*) AS count FROM matched GROUP BY source ORDER BY source",
@@ -308,26 +446,7 @@ export async function searchCohort(
   );
   const summaries = summaryRows.results;
   function hours(category: string) {
-    return numericSummary(
-      summaries.map((row) => {
-        if (row.timing_status === "retrospective_mixed") return null;
-        const activity = (
-          JSON.parse(row.activities_json) as CorpusActivity[]
-        ).find((a) => a.category === category);
-        if (
-          !activity ||
-          !["reported", "explicit_absence"].includes(
-            activity.hours.precision,
-          ) ||
-          activity.timing === "after_submission" ||
-          activity.timing === "projected"
-        )
-          return null;
-        return activity.hours.min === activity.hours.max
-          ? activity.hours.min
-          : null;
-      }),
-    );
+    return numericSummary(summaries.map((row) => categoryHours(row, category)));
   }
   return {
     counts: {
@@ -335,6 +454,14 @@ export async function searchCohort(
       matched: countRow?.n ?? 0,
       examined: profiles.length,
       withReportedOutcomes: countRow?.outcome_n ?? 0,
+      withAnyReportedOutcomes: countRow?.any_outcome_n ?? 0,
+      withoutReportedOutcomes:
+        (countRow?.n ?? 0) - (countRow?.any_outcome_n ?? 0),
+      withKnownCycle: countRow?.known_cycle_n ?? 0,
+      withReportedGpa: countRow?.gpa_n ?? 0,
+      withReportedMcat: countRow?.mcat_n ?? 0,
+      withUsableGpa: countRow?.usable_gpa_n ?? 0,
+      withUsableMcat: countRow?.usable_mcat_n ?? 0,
       summarized: summaries.length,
     },
     filters,
@@ -351,7 +478,9 @@ export async function searchCohort(
       "Counts identify distinct public source accounts, not verified distinct people across sites.",
       "Matching is deterministic; the model receives only the examined profile sample, ordered by cycle then ID.",
       `Numerical summaries use ${summaries.length} matching accounts (maximum 1,000), separate from the ${profiles.length} retrieved profiles.`,
-      "Hours exclude ranges, estimates, unreported values, projections, and profiles with mixed timing; zero is included only when explicitly reported.",
+      "Hours exclude ranges, estimates, unreported values, projections, mixed/unknown timing, and unestablished or overlapping category totals; zero is included only when explicitly reported.",
+      "Academic filters and numerical summaries use exact supported scalar values only. Reported approximations, bounds and ranges remain visible but are excluded from exact numerical comparisons; they are not wholly unreported.",
+      "Known-cycle outcome counts require actual unconditional acceptance/rejection in the selected known cycle. Any-outcome counts also include reports whose cycle is unknown; no reported acceptance/rejection does not mean none occurred.",
       "Self-selected reports are not representative. A reported outcome does not establish a fully observed final cycle or an admissions probability.",
     ],
   };
@@ -372,40 +501,97 @@ export async function inspectProfile(
   return row ? (JSON.parse(row.profile_json) as CorpusProfile) : null;
 }
 
-export async function getCorpusStats(db: D1Database) {
-  const [total, sources, cycles, lastImport] = await Promise.all([
-    db
-      .prepare(
-        `SELECT COUNT(DISTINCT account_id) AS n,MAX(json_extract(profile_json,'$.reviewedAt')) AS reviewed_at FROM corpus_profiles p WHERE ${BASE}`,
-      )
-      .first<{ n: number; reviewed_at: string | null }>(),
-    db
-      .prepare(
-        `SELECT a.source,COUNT(DISTINCT p.account_id) AS profiles FROM corpus_profiles p JOIN corpus_accounts a ON a.id=p.account_id WHERE ${BASE} GROUP BY a.source ORDER BY a.source`,
-      )
-      .all<{ source: CorpusSource; profiles: number }>(),
-    db
-      .prepare(
-        `SELECT p.cycle,COUNT(DISTINCT p.account_id) AS profiles FROM corpus_profiles p WHERE ${BASE} GROUP BY p.cycle ORDER BY p.cycle DESC`,
-      )
-      .all<{ cycle: string; profiles: number }>(),
-    db
-      .prepare(
-        "SELECT release FROM corpus_imports ORDER BY imported_at DESC LIMIT 1",
-      )
-      .first<{ release: string }>(),
-  ]);
+export async function getCorpusStats(
+  db: D1Database,
+): Promise<CorpusCoverageStats> {
+  const cte = `WITH candidates AS (SELECT p.*,a.source,ROW_NUMBER() OVER(PARTITION BY p.account_id ORDER BY ${SNAPSHOT_ORDER}) AS applicant_row FROM corpus_profiles p JOIN corpus_accounts a ON a.id=p.account_id WHERE ${BASE}), matched AS (${DISTINCT_MATCH})`;
+  const query = (sql: string) => db.prepare(`${cte} ${sql}`);
+  const [totals, sources, cycles, tiers, methods, lastImport] =
+    await Promise.all([
+      query(`SELECT COUNT(*) AS total,MAX(json_extract(profile_json,'$.reviewedAt')) AS reviewed_at,
+      SUM(CASE WHEN ${reportedAcademic("gpa")} THEN 1 ELSE 0 END) AS gpa_n,
+      SUM(CASE WHEN ${reportedAcademic("scienceGpa")} THEN 1 ELSE 0 END) AS science_gpa_n,
+      SUM(CASE WHEN ${reportedAcademic("mcat")} THEN 1 ELSE 0 END) AS mcat_n,
+      SUM(CASE WHEN ${usableAcademic("gpa")} THEN 1 ELSE 0 END) AS usable_gpa_n,
+      SUM(CASE WHEN ${usableAcademic("scienceGpa")} THEN 1 ELSE 0 END) AS usable_science_gpa_n,
+      SUM(CASE WHEN ${usableAcademic("mcat")} THEN 1 ELSE 0 END) AS usable_mcat_n,
+      SUM(CASE WHEN ${KNOWN_CYCLE} THEN 1 ELSE 0 END) AS cycle_n,
+      SUM(CASE WHEN json_array_length(activities_json)>0 THEN 1 ELSE 0 END) AS activities_n,
+      SUM(CASE WHEN EXISTS(SELECT 1 FROM corpus_outcomes o WHERE o.profile_id=matched.id AND ${ACTUAL_AR}) THEN 1 ELSE 0 END) AS outcome_n,
+      SUM(CASE WHEN ${KNOWN_CYCLE} AND EXISTS(SELECT 1 FROM corpus_outcomes o WHERE o.profile_id=matched.id AND o.cycle=matched.cycle AND ${ACTUAL_AR}) THEN 1 ELSE 0 END) AS aligned_n,
+      SUM(CASE WHEN EXISTS(SELECT 1 FROM json_each(COALESCE(json_extract(profile_json,'$.categoryHourTotals'),'{}')) t WHERE json_extract(t.value,'$.eligibility')='reviewed_complete_nonoverlapping' AND json_extract(t.value,'$.timing')='application_cycle') AND timing_status='cycle_report' THEN 1 ELSE 0 END) AS application_hours_n
+      FROM matched`).first<{
+        total: number;
+        reviewed_at: string | null;
+        gpa_n: number;
+        science_gpa_n: number;
+        mcat_n: number;
+        cycle_n: number | null;
+        activities_n: number | null;
+        outcome_n: number | null;
+        aligned_n: number | null;
+        application_hours_n: number | null;
+        usable_gpa_n: number | null;
+        usable_science_gpa_n: number | null;
+        usable_mcat_n: number | null;
+      }>(),
+      query(
+        "SELECT source,COUNT(*) AS profiles FROM matched GROUP BY source ORDER BY source",
+      ).all<{ source: string; profiles: number }>(),
+      query(
+        `SELECT cycle,COUNT(*) AS profiles FROM matched GROUP BY cycle ORDER BY CASE WHEN cycle='unknown' THEN 1 ELSE 0 END,cycle DESC`,
+      ).all<{ cycle: string; profiles: number }>(),
+      query(
+        "SELECT COALESCE(json_extract(profile_json,'$.evidenceTier'),'legacy_reviewed_outcome_report') AS tier,COUNT(*) AS profiles FROM matched GROUP BY tier ORDER BY tier",
+      ).all<{ tier: string; profiles: number }>(),
+      query(
+        "SELECT COALESCE(json_extract(profile_json,'$.reviewMethod'),'legacy_single_reviewer') AS method,COUNT(*) AS profiles FROM matched GROUP BY method ORDER BY method",
+      ).all<{ method: string; profiles: number }>(),
+      db
+        .prepare(
+          `SELECT COALESCE(
+            (SELECT release FROM corpus_active_release WHERE id=1),
+            (SELECT i.release FROM corpus_imports i
+             WHERE NOT EXISTS(SELECT 1 FROM corpus_collection_runs r WHERE r.release=i.release)
+             ORDER BY i.imported_at DESC LIMIT 1)
+          ) AS release`,
+        )
+        .first<{ release: string | null }>(),
+    ]);
+  const total = totals?.total ?? 0;
+  const any = totals?.outcome_n ?? 0;
   return {
-    totalProfiles: total?.n ?? 0,
+    totalProfiles: total,
     sourceCoverage: sources.results,
     cycles: cycles.results,
-    reviewedAt: total?.reviewed_at ?? null,
+    reviewedAt: totals?.reviewed_at ?? null,
     release: lastImport?.release ?? null,
+    knownOutcomeProfiles: any,
+    alignedOutcomeProfiles: totals?.aligned_n ?? 0,
+    profileOnlyCount: total - any,
+    missingness: {
+      gpa: total - (totals?.gpa_n ?? 0),
+      scienceGpa: total - (totals?.science_gpa_n ?? 0),
+      mcat: total - (totals?.mcat_n ?? 0),
+      cycle: total - (totals?.cycle_n ?? 0),
+      activities: total - (totals?.activities_n ?? 0),
+      acceptanceOrRejection: total - any,
+      // Even legacy cycle reports do not prove exact primary-submission timing.
+      applicationTimeActivityHours: total - (totals?.application_hours_n ?? 0),
+    },
+    numericEligibility: {
+      gpa: totals?.usable_gpa_n ?? 0,
+      scienceGpa: totals?.usable_science_gpa_n ?? 0,
+      mcat: totals?.usable_mcat_n ?? 0,
+    },
+    evidenceTierCoverage: tiers.results,
+    reviewMethodCoverage: methods.results,
     limitations: [
-      "Profiles are distinct public source accounts; cross-site identity is not inferred.",
+      "Counts identify distinct public source accounts; cross-site identity is not inferred. One selected snapshot per account is counted, with known cycles before unknown cycles.",
       "Self-selected reports do not represent all applicants or provide admissions probabilities.",
-      "An explicit acceptance or rejection does not establish a complete final cycle.",
-      "Range, approximate, missing, and later-cycle activity hours are kept distinct.",
+      "A reported acceptance or rejection does not establish a complete final cycle; missing outcomes do not establish that no acceptance occurred.",
+      "Source-date hours are not automatically hours at application. Ranges, estimates, missing values, projections, overlap and unestablished timing remain distinct.",
+      "Review methods describe source-supported extraction, not verified application files or uniformly human-reviewed records.",
     ],
   };
 }

@@ -90,6 +90,13 @@ describe("reviewed cohort retrieval", () => {
       matched: 3,
       examined: 1,
       withReportedOutcomes: 3,
+      withAnyReportedOutcomes: 3,
+      withoutReportedOutcomes: 0,
+      withKnownCycle: 3,
+      withReportedGpa: 3,
+      withReportedMcat: 3,
+      withUsableGpa: 3,
+      withUsableMcat: 3,
       summarized: 3,
     });
     expect(r.statistics.clinicalHours).toEqual({

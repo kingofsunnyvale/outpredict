@@ -13,6 +13,7 @@ import remarkGfm from "remark-gfm";
 import type {
   Attachment,
   Chat,
+  CorpusCoverageStats,
   Evidence,
   Message,
   Source,
@@ -31,13 +32,11 @@ type Conversation = {
 type Upload = Omit<Attachment, "status"> & {
   status: Attachment["status"] | "uploading";
 };
-type Corpus = {
-  totalProfiles: number;
-  sourceCoverage: { source: string; profiles: number }[];
-  cycles: { cycle: string; profiles: number }[];
-  reviewedAt: string | null;
-  release: string | null;
-  limitations: string[];
+type Corpus = CorpusCoverageStats;
+type AcademicMeasurement = {
+  min: number | null;
+  max: number | null;
+  precision: string;
 };
 type Progress = { id: string; stage: string; title: string; detail?: string };
 type Panel = { evidence: Evidence; sourceId?: string };
@@ -53,7 +52,26 @@ type ProfileDetail = {
   reviewStatus: string;
   timingStatus: string;
   extractionConfidence: string;
+  evidenceTier?: "reviewed_outcome_report" | "reviewed_profile";
+  reviewMethod?: string;
+  missingFields?: string[];
+  unavailableNumericFields?: string[];
+  academicMeasurements?: Partial<
+    Record<"gpa" | "scienceGpa" | "mcat", AcademicMeasurement>
+  >;
+  sourceSnapshotAt?: string | null;
+  humanReviewed?: boolean;
+  evidenceSpans?: {
+    field: string;
+    postId: string;
+    sourceUrl: string;
+    sourceArtifactSha256: string;
+    start: number;
+    end: number;
+    quote: string;
+  }[];
   activities: {
+    sourceField?: string;
     category: string;
     description: string;
     timing: string;
@@ -395,6 +413,237 @@ function CalculationReceipt({ excerpt }: { excerpt: string }) {
   );
 }
 
+function cycleLabel(value: string) {
+  return value === "unknown" ? "Cycle unreported" : `${value} cycle`;
+}
+
+function reviewMethodLabel(value?: string) {
+  if (
+    !value ||
+    value === "legacy_single_reviewer" ||
+    value === "legacy_single_review"
+  )
+    return "Legacy single-reviewer process";
+  if (value === "model_extraction_and_exact_source_validation")
+    return "Model extraction with exact source checks";
+  if (value === "independent_model_review_and_exact_source_validation")
+    return "Independent model review with exact source checks";
+  return friendly(value);
+}
+
+function missingFieldLabel(value: string) {
+  const labels: Record<string, string> = {
+    gpa: "GPA",
+    scienceGpa: "Science GPA",
+    mcat: "MCAT",
+    cycle: "Application cycle",
+    activities: "Activity details",
+    acceptance_or_rejection: "Acceptance or rejection",
+    application_time_activity_hours: "Application-time activity totals",
+  };
+  return labels[value] ?? friendly(value);
+}
+
+function timingLabel(value: string) {
+  const labels: Record<string, string> = {
+    cycle_report: "Reported for this cycle",
+    retrospective_mixed:
+      "Mixed or later reporting; application-time alignment unestablished",
+    source_snapshot: "Reported at the source date",
+    projected: "Projected experience",
+    unknown: "Timing unreported",
+  };
+  return labels[value] ?? friendly(value);
+}
+
+function activityHoursLabel(
+  hours: ProfileDetail["activities"][number]["hours"],
+) {
+  if (hours.precision === "unreported") return "Hours unreported";
+  if (hours.precision === "upper_bound" && hours.max !== null)
+    return `At most ${number(hours.max)} hours`;
+  if (hours.precision === "lower_bound" && hours.min !== null)
+    return `At least ${number(hours.min)} hours`;
+  if (hours.min === null) return "Hours unreported";
+  const amount =
+    hours.max !== null && hours.min !== hours.max
+      ? `${number(hours.min)}–${number(hours.max)}`
+      : number(hours.min);
+  if (hours.precision === "approximate") return `About ${amount} hours`;
+  if (hours.precision === "explicit_absence")
+    return `${amount} hours (explicitly reported)`;
+  return `${amount} hours`;
+}
+
+function academicLabel(
+  profile: ProfileDetail,
+  key: "gpa" | "scienceGpa" | "mcat",
+) {
+  const unavailable = profile.evidenceTier
+    ? "Unreported or unresolved"
+    : "Unreported";
+  const measurement = profile.academicMeasurements?.[key];
+  if (!measurement || (measurement.min === null && measurement.max === null))
+    return profile[key] ?? unavailable;
+  const { min, max, precision } = measurement;
+  if (precision === "upper_bound" && max !== null) return `At most ${max}`;
+  if (precision === "lower_bound" && min !== null) return `At least ${min}`;
+  const reported = min ?? max;
+  if (reported === null) return profile[key] ?? unavailable;
+  const amount =
+    min !== null && max !== null && min !== max
+      ? `${min}–${max}`
+      : String(reported);
+  return precision === "approximate" ? `~${amount}` : amount;
+}
+
+function ProfileFacts({ profile }: { profile: ProfileDetail }) {
+  return (
+    <>
+      <p className="op-profile-cycle">
+        {cycleLabel(profile.cycle)} · {profile.publicHandle}
+      </p>
+      {profile.sourceSnapshotAt !== undefined && (
+        <p className="op-fine-print">
+          {profile.sourceSnapshotAt
+            ? `Source dated ${profile.sourceSnapshotAt}`
+            : "Source date unreported"}
+        </p>
+      )}
+      <dl className="op-profile-academics">
+        {[
+          ["GPA", academicLabel(profile, "gpa")],
+          ["Science GPA", academicLabel(profile, "scienceGpa")],
+          ["MCAT", academicLabel(profile, "mcat")],
+          ["Residence", profile.residence],
+        ].map(([label, value]) => (
+          <div key={label}>
+            <dt>{label}</dt>
+            <dd>{value ?? "Unreported"}</dd>
+          </div>
+        ))}
+      </dl>
+      {!!profile.unavailableNumericFields?.length && (
+        <p className="op-fine-print">
+          Unavailable for exact numeric comparisons:{" "}
+          {profile.unavailableNumericFields.map(missingFieldLabel).join(", ")}.
+        </p>
+      )}
+      <h4>Reported activities</h4>
+      {profile.activities.length === 0 && (
+        <p className="op-fine-print">
+          No activity details are available in this reviewed profile.
+        </p>
+      )}
+      {profile.activities.map((activity) => (
+        <div
+          className="op-profile-activity"
+          key={
+            activity.sourceField ??
+            `${activity.category}-${activity.description}`
+          }
+        >
+          <strong>{friendly(activity.category)}</strong>
+          <span>
+            {activity.category !== "publications" && (
+              <>{activityHoursLabel(activity.hours)} · </>
+            )}
+            {timingLabel(activity.timing)}
+          </span>
+          <p>{activity.description}</p>
+        </div>
+      ))}
+      <h4>Reported outcomes</h4>
+      {profile.outcomes.length === 0 && (
+        <p className="op-fine-print">
+          No outcome details are available in this reviewed profile. This does
+          not establish a rejection or lack of acceptance.
+        </p>
+      )}
+      {profile.outcomes.map((outcome) => (
+        <div
+          className="op-profile-outcome"
+          key={`${outcome.status}-${outcome.school}-${outcome.evidence}`}
+        >
+          <strong>
+            {friendly(outcome.status)}
+            {outcome.conditional ? " (conditional)" : ""}
+          </strong>
+          <span>
+            {outcome.school ??
+              (outcome.reportedCount !== null
+                ? `${outcome.reportedCount} ${outcome.countKind.replace(/_/g, " ")}`
+                : "School not reported")}{" "}
+            ·{" "}
+            {["unknown", "unspecified_medical"].includes(outcome.program)
+              ? "Program unreported"
+              : outcome.program}{" "}
+            · {cycleLabel(outcome.cycle)}
+          </span>
+          <p>{outcome.evidence}</p>
+        </div>
+      ))}
+      <h4>Review & missing information</h4>
+      {profile.evidenceTier && (
+        <p className="op-fine-print">
+          {profile.evidenceTier === "reviewed_outcome_report"
+            ? "An explicit acceptance or rejection is reported; the cycle may be unknown."
+            : "Profile facts are available without a reported acceptance or rejection."}
+        </p>
+      )}
+      <p className="op-fine-print">
+        Method: {reviewMethodLabel(profile.reviewMethod)}.
+        {profile.humanReviewed === false
+          ? " Human review was not performed."
+          : ""}{" "}
+        Extraction confidence: {friendly(profile.extractionConfidence)}. Timing:{" "}
+        {timingLabel(profile.timingStatus)}. Reports may not cover the final
+        cycle.
+      </p>
+      {!!profile.missingFields?.length && (
+        <p className="op-fine-print">
+          Unreported or unestablished:{" "}
+          {profile.missingFields.map(missingFieldLabel).join(", ")}. Missing
+          information is not zero.
+        </p>
+      )}
+      {!!profile.evidenceSpans?.length && (
+        <details>
+          <summary>
+            Supporting source excerpts ({number(profile.evidenceSpans.length)})
+          </summary>
+          {profile.evidenceSpans.map((span) => {
+            const url = safeLink(span.sourceUrl);
+            return (
+              <div
+                className="op-profile-activity"
+                key={`${span.postId}-${span.field}-${span.start}-${span.end}`}
+              >
+                <p>“{span.quote}”</p>
+                {url && (
+                  <a
+                    className="op-source-link"
+                    href={url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    View original <Icon name="external" size={13} />
+                  </a>
+                )}
+              </div>
+            );
+          })}
+        </details>
+      )}
+      {profile.notes.map((note) => (
+        <p className="op-fine-print" key={note}>
+          {note}
+        </p>
+      ))}
+    </>
+  );
+}
+
 function SourceCard({
   source,
   selected,
@@ -492,90 +741,181 @@ function SourceCard({
           ) : !profile ? (
             <p role="status">Loading reported profile…</p>
           ) : (
-            <>
-              <p className="op-profile-cycle">
-                {profile.cycle} cycle · {profile.publicHandle}
-              </p>
-              <dl className="op-profile-academics">
-                {[
-                  ["GPA", profile.gpa],
-                  ["Science GPA", profile.scienceGpa],
-                  ["MCAT", profile.mcat],
-                  ["Residence", profile.residence],
-                ].map(([label, value]) => (
-                  <div key={label}>
-                    <dt>{label}</dt>
-                    <dd>{value ?? "Unreported"}</dd>
-                  </div>
-                ))}
-              </dl>
-              <h4>Reported activities</h4>
-              {profile.activities.map((activity) => (
-                <div
-                  className="op-profile-activity"
-                  key={`${activity.category}-${activity.description}`}
-                >
-                  <strong>{friendly(activity.category)}</strong>
-                  <span>
-                    {activity.category !== "publications" && (
-                      <>
-                        {activity.hours.min === null
-                          ? "Hours unreported"
-                          : activity.hours.min === activity.hours.max
-                            ? `${activity.hours.min} hours`
-                            : activity.hours.max === null
-                              ? `At least ${activity.hours.min} hours`
-                              : `${activity.hours.min}–${activity.hours.max} hours`}
-                        {activity.hours.min !== null &&
-                          ` · ${friendly(activity.hours.precision)}`}{" "}
-                        ·{" "}
-                      </>
-                    )}
-                    {friendly(activity.timing)}
-                  </span>
-                  <p>{activity.description}</p>
-                </div>
-              ))}
-              <h4>Reported outcomes</h4>
-              {profile.outcomes.map((outcome) => (
-                <div
-                  className="op-profile-outcome"
-                  key={`${outcome.status}-${outcome.school}-${outcome.evidence}`}
-                >
-                  <strong>
-                    {friendly(outcome.status)}
-                    {outcome.conditional ? " (conditional)" : ""}
-                  </strong>
-                  <span>
-                    {outcome.school ??
-                      (outcome.reportedCount !== null
-                        ? `${outcome.reportedCount} ${outcome.countKind.replace(/_/g, " ")}`
-                        : "School not reported")}{" "}
-                    ·{" "}
-                    {outcome.program === "unknown"
-                      ? "Program unreported"
-                      : outcome.program}{" "}
-                    · {outcome.cycle}
-                  </span>
-                  <p>{outcome.evidence}</p>
-                </div>
-              ))}
-              <p className="op-fine-print">
-                Review: {friendly(profile.reviewStatus)}. Extraction confidence:{" "}
-                {friendly(profile.extractionConfidence)}. Timing:{" "}
-                {friendly(profile.timingStatus)}. Reported outcomes may not
-                cover the final cycle.
-              </p>
-              {profile.notes.map((note) => (
-                <p className="op-fine-print" key={note}>
-                  {note}
-                </p>
-              ))}
-            </>
+            <ProfileFacts profile={profile} />
           )}
         </div>
       )}
     </article>
+  );
+}
+
+function CorpusCoverage({ corpus }: { corpus: Corpus }) {
+  return (
+    <>
+      <div className="op-corpus-total">
+        <strong>{number(corpus.totalProfiles)}</strong>
+        <span>reviewed profiles available for retrieval</span>
+      </div>
+      <p className="op-fine-print">
+        Counts are distinct public source accounts in the released corpus, not
+        pages collected. Review methods differ and are listed below.
+      </p>
+      <div className="op-coverage-grid">
+        <section>
+          <h3>Outcome coverage</h3>
+          <dl>
+            {[
+              [
+                "Any reported acceptance/rejection",
+                corpus.knownOutcomeProfiles,
+              ],
+              [
+                "Known-cycle acceptance/rejection",
+                corpus.alignedOutcomeProfiles,
+              ],
+              ["No acceptance/rejection reported", corpus.profileOnlyCount],
+            ].map(([label, count]) => (
+              <div key={label}>
+                <dt>{label}</dt>
+                <dd>{typeof count === "number" ? number(count) : count}</dd>
+              </div>
+            ))}
+          </dl>
+          <p className="op-fine-print">
+            The first count includes unknown-cycle reports. The second requires
+            an outcome in the profile's known cycle. Neither establishes a
+            final-cycle result for every school.
+          </p>
+        </section>
+        <section>
+          <h3>Missing or unestablished</h3>
+          <dl>
+            {[
+              ["GPA", corpus.missingness.gpa],
+              ["Science GPA", corpus.missingness.scienceGpa],
+              ["MCAT", corpus.missingness.mcat],
+              ["Application cycle", corpus.missingness.cycle],
+              ["Activity details", corpus.missingness.activities],
+              [
+                "Acceptance or rejection",
+                corpus.missingness.acceptanceOrRejection,
+              ],
+              [
+                "Application-time activity totals",
+                corpus.missingness.applicationTimeActivityHours,
+              ],
+            ].map(([label, count]) => (
+              <div key={label}>
+                <dt>{label}</dt>
+                <dd>{typeof count === "number" ? number(count) : count}</dd>
+              </div>
+            ))}
+          </dl>
+          <p className="op-fine-print">
+            Each count uses all {number(corpus.totalProfiles)} profiles.
+            Categories can overlap; missing information is not zero. Reported
+            approximations and ranges are not counted as missing.
+          </p>
+        </section>
+        <section>
+          <h3>Exact academic values</h3>
+          <dl>
+            {[
+              ["GPA", corpus.numericEligibility.gpa],
+              ["Science GPA", corpus.numericEligibility.scienceGpa],
+              ["MCAT", corpus.numericEligibility.mcat],
+            ].map(([label, count]) => (
+              <div key={label}>
+                <dt>{label}</dt>
+                <dd>{typeof count === "number" ? number(count) : count}</dd>
+              </div>
+            ))}
+          </dl>
+          <p className="op-fine-print">
+            These profiles have exact values for numeric filters and medians.
+            Reported approximations, ranges and bounds remain visible in their
+            profiles but are excluded from these counts.
+          </p>
+        </section>
+        <section>
+          <h3>Source coverage</h3>
+          <dl>
+            {corpus.sourceCoverage.map((source) => (
+              <div key={source.source}>
+                <dt>
+                  {source.source === "sdn"
+                    ? "Student Doctor Network"
+                    : source.source === "mdapplicants"
+                      ? "MDApplicants"
+                      : source.source === "reddit"
+                        ? "Reddit"
+                        : friendly(source.source)}
+                </dt>
+                <dd>{number(source.profiles)}</dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+        <section>
+          <h3>Application cycles</h3>
+          <dl>
+            {corpus.cycles.map((cycle) => (
+              <div key={cycle.cycle}>
+                <dt>
+                  {cycle.cycle === "unknown" ? "Unreported" : cycle.cycle}
+                </dt>
+                <dd>{number(cycle.profiles)}</dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+        <section>
+          <h3>Evidence present</h3>
+          <dl>
+            {corpus.evidenceTierCoverage.map((entry) => (
+              <div key={entry.tier}>
+                <dt>
+                  {entry.tier === "reviewed_outcome_report"
+                    ? "Profile with an acceptance/rejection report"
+                    : entry.tier === "reviewed_profile"
+                      ? "Profile without an acceptance/rejection report"
+                      : entry.tier === "legacy_reviewed_outcome_report"
+                        ? "Legacy reviewed profile"
+                        : friendly(entry.tier)}
+                </dt>
+                <dd>{number(entry.profiles)}</dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+        <section>
+          <h3>Review methods</h3>
+          <dl>
+            {corpus.reviewMethodCoverage.map((entry) => (
+              <div key={entry.method}>
+                <dt>{reviewMethodLabel(entry.method)}</dt>
+                <dd>{number(entry.profiles)}</dd>
+              </div>
+            ))}
+          </dl>
+          <p className="op-fine-print">
+            Model review and exact source checks do not imply human review or a
+            full application record.
+          </p>
+        </section>
+      </div>
+      {corpus.reviewedAt && (
+        <p className="op-fine-print">
+          Latest profile review: {corpus.reviewedAt}
+        </p>
+      )}
+      <h3>What to keep in mind</h3>
+      <ul className="op-limitations">
+        {corpus.limitations.map((limitation) => (
+          <li key={limitation}>{limitation}</li>
+        ))}
+      </ul>
+    </>
   );
 }
 
@@ -630,18 +970,68 @@ function EvidenceContent({ panel }: { panel: Panel }) {
               ["Matched your filters", cohort.matchedProfiles],
               ["Retrieved for this question", cohort.examinedProfiles],
               ["Supporting this answer", cohort.supportingProfiles],
-              ["Matched with reported outcomes", cohort.profilesWithOutcomes],
-            ].map(([label, count]) => (
-              <div key={label}>
-                <dt>{label}</dt>
-                <dd>{typeof count === "number" ? number(count) : count}</dd>
-              </div>
-            ))}
+              ["Known-cycle acceptance/rejection", cohort.profilesWithOutcomes],
+              [
+                "Any reported acceptance/rejection",
+                cohort.profilesWithAnyOutcomes,
+              ],
+              [
+                "No acceptance/rejection reported",
+                cohort.profilesWithoutOutcomes,
+              ],
+            ]
+              .filter(([, count]) => count !== undefined)
+              .map(([label, count]) => (
+                <div key={label}>
+                  <dt>{label}</dt>
+                  <dd>{typeof count === "number" ? number(count) : count}</dd>
+                </div>
+              ))}
           </dl>
           <p className="op-fine-print">
             Counts refer to distinct source accounts. Matching a filter does not
-            mean the model reviewed every matching profile.
+            mean the model read every matching profile. Outcome counts apply to
+            the matched accounts; an unknown cycle is excluded from the
+            known-cycle count.
           </p>
+          {(cohort.profilesWithKnownCycle !== undefined ||
+            cohort.profilesWithReportedGpa !== undefined ||
+            cohort.profilesWithReportedMcat !== undefined ||
+            cohort.profilesWithUsableGpa !== undefined ||
+            cohort.profilesWithUsableMcat !== undefined) && (
+            <details>
+              <summary>Reported information in matched profiles</summary>
+              <dl className="op-filters">
+                {[
+                  ["Known application cycle", cohort.profilesWithKnownCycle],
+                  ["Reported GPA", cohort.profilesWithReportedGpa],
+                  [
+                    "Exact GPA for numeric comparisons",
+                    cohort.profilesWithUsableGpa,
+                  ],
+                  ["Reported MCAT", cohort.profilesWithReportedMcat],
+                  [
+                    "Exact MCAT for numeric comparisons",
+                    cohort.profilesWithUsableMcat,
+                  ],
+                ]
+                  .filter(([, count]) => count !== undefined)
+                  .map(([label, count]) => (
+                    <div key={label}>
+                      <dt>{label}</dt>
+                      <dd>
+                        {typeof count === "number" ? number(count) : count}
+                      </dd>
+                    </div>
+                  ))}
+              </dl>
+              <p>
+                These counts use the matched accounts. Unreported values are not
+                zero. Reported values may be approximate or bounded; only exact
+                values enter numeric filters and medians.
+              </p>
+            </details>
+          )}
           <details open>
             <summary>Filters & coverage</summary>
             <dl className="op-filters">
@@ -661,7 +1051,10 @@ function EvidenceContent({ panel }: { panel: Panel }) {
               <p className="op-fine-print">
                 {cohort.coverage.sources.join(", ")}
                 <br />
-                Cycles: {cohort.coverage.cycles.join(", ")}
+                Cycles:{" "}
+                {cohort.coverage.cycles
+                  .map((cycle) => (cycle === "unknown" ? "Unreported" : cycle))
+                  .join(", ")}
               </p>
             )}
           </details>
@@ -2364,7 +2757,7 @@ export function ProductApp() {
       )}
       {modal === "corpus" && (
         <Modal
-          title="A small corpus. Clear provenance."
+          title="Applicant reports. Clear provenance."
           close={() => setModal(null)}
         >
           <p className="op-modal-intro">
@@ -2378,53 +2771,7 @@ export function ProductApp() {
             coverage. Missing reports cannot establish an applicant's outcome.
           </p>
           {corpus ? (
-            <>
-              <div className="op-corpus-total">
-                <strong>{number(corpus.totalProfiles)}</strong>
-                <span>reviewed public source profiles</span>
-              </div>
-              <div className="op-coverage-grid">
-                <section>
-                  <h3>Source coverage</h3>
-                  <dl>
-                    {corpus.sourceCoverage.map((source) => (
-                      <div key={source.source}>
-                        <dt>
-                          {source.source === "sdn"
-                            ? "Student Doctor Network"
-                            : source.source === "mdapplicants"
-                              ? "MDApplicants"
-                              : "Reddit"}
-                        </dt>
-                        <dd>{source.profiles}</dd>
-                      </div>
-                    ))}
-                  </dl>
-                </section>
-                <section>
-                  <h3>Application cycles</h3>
-                  <dl>
-                    {corpus.cycles.map((cycle) => (
-                      <div key={cycle.cycle}>
-                        <dt>{cycle.cycle}</dt>
-                        <dd>{cycle.profiles}</dd>
-                      </div>
-                    ))}
-                  </dl>
-                </section>
-              </div>
-              {corpus.reviewedAt && (
-                <p className="op-fine-print">
-                  Last reviewed: {corpus.reviewedAt}
-                </p>
-              )}
-              <h3>What to keep in mind</h3>
-              <ul className="op-limitations">
-                {corpus.limitations.map((limitation) => (
-                  <li key={limitation}>{limitation}</li>
-                ))}
-              </ul>
-            </>
+            <CorpusCoverage corpus={corpus} />
           ) : modalError ? (
             <div className="op-error" role="alert">
               {modalError}

@@ -6,8 +6,8 @@ Google authentication, the reviewed corpus, and private
 conversation/file storage are merged and verified in staging and production.
 OUT-9 adds verified streamed advice grounded in the scraped student corpus. The
 product scope excludes outside web search and official-policy retrieval. The
-OUT-10 interface is deployed in both environments. Final domain acceptance is
-tracked separately in OUT-13.
+OUT-10 interface is deployed in both environments. OUT-13 verified the canonical
+production domain, Google login/logout, attachments, conversation and mobile flows.
 
 Detailed contracts and limitations live in [DATA.md](DATA.md),
 [STORAGE.md](STORAGE.md), and [RUNTIME.md](RUNTIME.md).
@@ -51,6 +51,8 @@ npm run dev
 npm run lint
 npm run typecheck
 node scripts/validate-corpus.mjs
+npm run test:corpus-pipeline
+npm run test:collection
 node scripts/smoke-product.mjs --self-test
 npm test
 npm run build
@@ -97,17 +99,27 @@ arbitrary version-preview origins cannot authenticate.
 
 The migration sequence is `0001_auth.sql`, `0002_corpus.sql`, then
 `0003_conversations.sql`; all three are applied in both environments.
-Migrations never run automatically. Apply reviewed pending migrations and imports
-in staging, deploy and verify, then apply corresponding production state changes
-before merging dependent code:
+Migrations never run automatically. Apply reviewed additive migrations in staging,
+deploy compatible branch code, then import and verify the frozen dataset. For the
+v2 corpus rollout, production must receive compatible code before new profiles
+become current:
 
 ```sh
 npm run db:migrate:staging
 npm run deploy:staging
-# Run the deployed API smoke and browser checks below.
+# Import the frozen reviewed dataset, then run API and browser checks.
 npm run db:migrate:production
-# Import reviewed production data if this release changes it, then merge after CI.
+# Additive migration only; upload private artifacts without activating profiles.
+# Merge after CI and staging acceptance; verify both automatic deployments.
+# Import the identical frozen production dataset and verify its release marker.
 ```
+
+Use one immutable, idempotent SQL file with its release marker for each data
+activation. The import temporarily makes D1 unavailable; measure this in staging.
+An uncertain client result requires reading the marker before retrying the same
+file. Reimporting a smaller baseline does not deactivate added profiles. Rollback
+must target the release's exact introduced IDs and prior current versions; avoid
+whole-database restore because D1 also holds private chats and authentication.
 
 `npm run deploy:production` supports coordinated direct releases/recovery. A merge
 is a release: inspect deployment and resolve failures before calling it shipped.
@@ -243,3 +255,4 @@ interface deployment and browser evidence is recorded with OUT-10.
 | OUT-9 | [PR #6](https://github.com/kingofsunnyvale/outpredict/pull/6), merge `420a509a2a2592df188af482825a7758288302c9`; 72 tests and required checks pass. Staging branch `58c3f3a` / version `5dcccc68-a195-42c2-be33-0dbca3c9a97f` passed real-agent and private-storage smoke. Automatic main deployments passed: staging `55e674ec-ea98-4041-afcd-09b57483ad29`, production `fe0d16b6-e58e-4607-8518-958187f5c5fc`. Production smoke and manual answer review passed: 58 matching, 12 retrieved, two cited supporting accounts, saved evidence/calculations consistent, exact synthetic cleanup complete. |
 | OUT-10 | [PR #7](https://github.com/kingofsunnyvale/outpredict/pull/7), merge `46e5765e494a1c4a3377861141adb5f5afd71e98`; 72 tests and required checks pass. Exact branch `ad6ab18` passed staging at `b62b91f1-b6d5-4cf9-a5c3-bf73842015ca`: Google draft, PDF plan/follow-up, profile/evidence inspection, saved history and mobile. Automatic main staging `797045dd-d1f9-42a3-b461-3276525eda52` and production `a578b61e-4afc-42cd-bbbe-18431e39dfdb` passed. Production Google draft and saved conversation confirmed. Model answer-quality corrections and final domain flows continue in OUT-12/13. |
 | OUT-12 | [PR #8](https://github.com/kingofsunnyvale/outpredict/pull/8), merge `0261fe43b842a9b045fe0e628c811e57fbf50690`; 90 tests, lint, typecheck, both builds and required CI pass. Exact branch `afbec405` passed staging `80edf5f0-1aa6-4949-b545-208388c6cea6`, including the browser résumé/time-budget follow-up. Automatic main staging `ce9779c1-5cd9-46ed-8e54-9bd7f4eefabc` and production `23b2ccfd-af34-41c6-bdb5-4f706b231ef8` passed. Real production agent/storage/cancellation/replay/deletion smoke and manual answer review passed: 58 matched, 2 retrieved, 2 cited accounts with accurate publication and missing-hours distinctions; exact synthetic cleanup complete. |
+| OUT-13 | [PR #9](https://github.com/kingofsunnyvale/outpredict/pull/9), merge `90fa8337fdf13866d843f0fbf1744fb6e1795f66`; 96 tests and required CI pass. Exact branch `d4ce8d1` passed staging `1021f5c4-f03b-40f1-8c63-eaf4d5c903c9`. Automatic staging `3e646bf7-e72b-4bc9-b6f4-8593891a75fe` and production `3a53d53c-3525-410f-99f3-76944a7b43fe` passed. Canonical HTTPS, public pages, safe legacy redirect, actual Google draft/login/logout, PDF/PNG extraction, accurate time-budget follow-up, 58 available/13 matched/2 retrieved/2 cited counts, profile inspection, reload and 390px mobile flows passed. One interrupted answer recovered through retry. Canonical API ownership/cancellation/replay/delete smoke and exact synthetic cleanup also passed. |

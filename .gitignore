@@ -1,5 +1,6 @@
 # Local tooling and generated output
 .wrangler/
+.local/
 node_modules/
 dist/
 coverage/
@@ -8,6 +9,7 @@ test-results/
 .venv/
 __pycache__/
 *.py[cod]
+/scripts/collection/state/
 .DS_Store
 
 # Local credentials; commit templates only

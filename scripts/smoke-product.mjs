@@ -6,6 +6,8 @@
  * node scripts/smoke-product.mjs --env staging --storage-only
  * node scripts/smoke-product.mjs --env production --agent
  * node scripts/smoke-product.mjs --env staging --agent --report /tmp/corpus-smoke.json
+ * Add --question-file PATH for a targeted corpus scenario. Reports and recovery
+ * manifests should live in durable ignored .local/ storage.
  * node scripts/smoke-product.mjs --env staging --cleanup /tmp/.../cleanup.json
  * node scripts/smoke-product.mjs --self-test
  *
@@ -24,8 +26,9 @@
  */
 import { execFile } from "node:child_process";
 import { createHmac, randomBytes, randomUUID } from "node:crypto";
-import {
+import fileSystem, {
   chmod,
+  mkdir,
   mkdtemp,
   readFile,
   rm,
@@ -42,7 +45,7 @@ import { validateCorpus } from "./validate-corpus.mjs";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const execute = promisify(execFile);
 const fixturePattern = /^outpredict-smoke-[a-f0-9-]{36}-[ab]$/;
-const question =
+const defaultQuestion =
   "Use the reviewed applicant corpus with no filters. Compare two reported applicants and explain matched, examined, and supporting counts. State the sample limitations. Keep the answer under 200 words.";
 const syntheticText =
   "Synthetic test résumé. GPA 3.75. MCAT 515. Clinical volunteering: 250 completed hours. This document contains no real person's information.";
@@ -62,7 +65,12 @@ function argumentsFor(argv) {
     else if (flag === "--self-test") options.selfTest = true;
     else if (flag === "--agent") options.agent = true;
     else if (flag === "--storage-only") options.storageOnly = true;
-    else if (flag === "--env" || flag === "--cleanup" || flag === "--report") {
+    else if (
+      flag === "--env" ||
+      flag === "--cleanup" ||
+      flag === "--report" ||
+      flag === "--question-file"
+    ) {
       ensure(argv[i + 1] && !argv[i + 1].startsWith("--"), "missing_argument");
       options[flag.slice(2)] = argv[++i];
     } else throw new SmokeFailure("unknown_argument");
@@ -78,7 +86,24 @@ function argumentsFor(argv) {
     "storage_only_cannot_run_agent",
   );
   ensure(!options.report || options.agent, "report_requires_agent");
+  ensure(!options["question-file"] || options.agent, "question_requires_agent");
   return options;
+}
+
+async function writeCleanupManifest(path, manifest) {
+  // A sibling temporary file keeps replacement atomic on the same filesystem.
+  // Flush before rename so interruption cannot truncate the last recovery record.
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  try {
+    await fileSystem.writeFile(temporary, JSON.stringify(manifest), {
+      mode: 0o600,
+      flag: "wx",
+      flush: true,
+    });
+    await fileSystem.rename(temporary, path);
+  } finally {
+    await fileSystem.rm(temporary, { force: true });
+  }
 }
 
 function sessionCookie(token, secret) {
@@ -189,6 +214,10 @@ async function consumeEvents(response, onEvent = async () => {}) {
 
 async function main(options) {
   ensure(Number(process.versions.node.split(".")[0]) >= 24, "node_24_required");
+  const question = options["question-file"]
+    ? (await readFile(resolve(options["question-file"]), "utf8")).trim()
+    : defaultQuestion;
+  ensure(question.length > 0 && question.length <= 20000, "invalid_question");
   const config = JSON.parse(
     await readFile(join(root, "wrangler.jsonc"), "utf8"),
   );
@@ -215,7 +244,9 @@ async function main(options) {
       /^[a-f0-9-]{36}$/.test(db.database_id),
     "invalid_resource_ids",
   );
-  const runDirectory = await mkdtemp(join(tmpdir(), "outpredict-smoke-"));
+  const smokeDirectory = join(root, ".local", "smoke");
+  await mkdir(smokeDirectory, { recursive: true, mode: 0o700 });
+  const runDirectory = await mkdtemp(join(smokeDirectory, "run-"));
   await chmod(runDirectory, 0o700);
   const logPath = join(runDirectory, "wrangler.log");
   // Wrangler logs logger output, including auth-token output. Send it to the
@@ -480,7 +511,7 @@ async function main(options) {
       userIds,
       keys: [],
     };
-    await writeFile(manifestPath, JSON.stringify(manifest), { mode: 0o600 });
+    await writeCleanupManifest(manifestPath, manifest);
     // Mark before the first insert: an uncertain/partial request must still clean up.
     created = true;
     const cookies = [];
@@ -521,6 +552,7 @@ async function main(options) {
       stats.totalProfiles === expected.sourceAccounts,
       "corpus_account_count_mismatch",
     );
+    ensure(stats.release === local.release, "corpus_release_mismatch");
     for (const [source, count] of Object.entries(expected.sources))
       ensure(
         stats.sourceCoverage?.find((row) => row.source === source)?.profiles ===
@@ -532,6 +564,58 @@ async function main(options) {
         stats.cycles?.find((row) => row.cycle === cycle)?.profiles === count,
         "corpus_cycle_count_mismatch",
       );
+    if (local.version === 2) {
+      const hasOutcome = (p) =>
+        p.outcomes.some(
+          (o) => ["accepted", "rejected"].includes(o.status) && !o.conditional,
+        );
+      const withOutcome = local.profiles.filter(hasOutcome).length;
+      ensure(
+        stats.knownOutcomeProfiles === withOutcome,
+        "outcome_coverage_mismatch",
+      );
+      ensure(
+        stats.profileOnlyCount === expected.sourceAccounts - withOutcome,
+        "partial_coverage_mismatch",
+      );
+      for (const metric of ["gpa", "scienceGpa", "mcat"]) {
+        const exact = local.profiles.filter(
+          (p) =>
+            p[metric] !== null &&
+            (!p.academicMeasurements?.[metric] ||
+              p.academicMeasurements[metric].precision === "reported"),
+        ).length;
+        ensure(
+          stats.numericEligibility?.[metric] === exact,
+          "numeric_eligibility_mismatch",
+        );
+      }
+      const samples = new Map();
+      for (const predicate of [
+        (p) => p.evidenceTier && p.cycle === "unknown",
+        (p) =>
+          Object.values(p.academicMeasurements ?? {}).some(
+            (m) => m.precision === "approximate",
+          ),
+        (p) => p.evidenceTier === "reviewed_outcome_report",
+      ]) {
+        const p = local.profiles.find(predicate);
+        if (p) samples.set(p.id, p);
+      }
+      for (const [id, expectedProfile] of samples) {
+        const endpoint = `/api/corpus/profiles/${encodeURIComponent(id)}`;
+        await api(endpoint, undefined, { expected: 401 });
+        const result = await jsonBody(await api(endpoint, cookieA));
+        ensure(
+          JSON.stringify(result.profile) === JSON.stringify(expectedProfile),
+          "profile_readback_mismatch",
+        );
+      }
+      report("v2_profile_evidence", {
+        status: "passed",
+        inspected: samples.size,
+      });
+    }
     report(phase, { status: "passed", sourceAccounts: stats.totalProfiles });
 
     phase = "chat_and_file_isolation";
@@ -572,7 +656,7 @@ async function main(options) {
     const filePath = `/api/attachments/${attachment.id}`;
     knownKeys.add(`users/${userIds[0]}/attachments/${attachment.id}`);
     manifest.keys = [...knownKeys];
-    await writeFile(manifestPath, JSON.stringify(manifest), { mode: 0o600 });
+    await writeCleanupManifest(manifestPath, manifest);
     await api(`${filePath}?download=1`, cookieB, { expected: 404 });
     await api(filePath, cookieB, { method: "DELETE", expected: 404 });
     ensure(
@@ -921,6 +1005,67 @@ async function selfTest() {
     refused = true;
   }
   ensure(refused, "environment_required_test");
+  ensure(
+    argumentsFor([
+      "--env",
+      "staging",
+      "--agent",
+      "--question-file",
+      "/tmp/question.txt",
+    ])["question-file"],
+    "question_arguments_test",
+  );
+  let questionRefused = false;
+  try {
+    argumentsFor(["--env", "staging", "--question-file", "/tmp/question.txt"]);
+  } catch {
+    questionRefused = true;
+  }
+  ensure(questionRefused, "question_requires_agent_test");
+  const directory = await mkdtemp(join(tmpdir(), "outpredict-smoke-selftest-"));
+  const manifestPath = join(directory, "cleanup.json");
+  const originalRename = fileSystem.rename;
+  try {
+    const first = { userIds: ["synthetic-a", "synthetic-b"], keys: [] };
+    await writeCleanupManifest(manifestPath, first);
+    ensure(
+      ((await stat(manifestPath)).mode & 0o777) === 0o600,
+      "manifest_private_permissions_test",
+    );
+    fileSystem.rename = async () => {
+      throw new Error("Synthetic replacement failure");
+    };
+    let replacementFailed = false;
+    try {
+      await writeCleanupManifest(manifestPath, { ...first, keys: ["new-key"] });
+    } catch {
+      replacementFailed = true;
+    } finally {
+      fileSystem.rename = originalRename;
+    }
+    ensure(replacementFailed, "manifest_failed_replace_test");
+    ensure(
+      (await readFile(manifestPath, "utf8")) === JSON.stringify(first),
+      "manifest_previous_survives_test",
+    );
+    ensure(
+      (await fileSystem.readdir(directory)).length === 1,
+      "manifest_temp_cleanup_test",
+    );
+    const next = { ...first, keys: ["new-key"] };
+    await writeCleanupManifest(manifestPath, next);
+    ensure(
+      (await readFile(manifestPath, "utf8")) === JSON.stringify(next),
+      "manifest_replace_test",
+    );
+    ensure(
+      ((await stat(manifestPath)).mode & 0o777) === 0o600,
+      "manifest_replacement_permissions_test",
+    );
+  } finally {
+    fileSystem.rename = originalRename;
+    await rm(directory, { recursive: true, force: true });
+  }
   const secret = "synthetic-test-only-secret-for-format-check";
   const token = "synthetic-test-only-token";
   const value = decodeURIComponent(sessionCookie(token, secret).split("=")[1]);
@@ -958,7 +1103,12 @@ async function selfTest() {
     parsed.text === "Résumé" && parsed.status === "complete",
     "chunked_stream_test",
   );
-  report("self_test", { status: "passed", networkRequests: 0, mutations: 0 });
+  report("self_test", {
+    status: "passed",
+    networkRequests: 0,
+    remoteMutations: 0,
+    atomicManifestChecks: "passed",
+  });
 }
 
 try {
