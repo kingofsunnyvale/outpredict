@@ -17,11 +17,44 @@ export type CohortStats = {
   matchedProfiles: number;
   examinedProfiles: number;
   supportingProfiles: number;
+  /** Actual, unconditional acceptance/rejection in a known matching cycle. */
   profilesWithOutcomes: number;
+  /** Optional for historical persisted evidence. */
+  profilesWithAnyOutcomes?: number;
+  profilesWithoutOutcomes?: number;
+  profilesWithKnownCycle?: number;
+  profilesWithReportedGpa?: number;
+  profilesWithReportedMcat?: number;
+  profilesWithUsableGpa?: number;
+  profilesWithUsableMcat?: number;
   filters: Record<string, string | number | boolean | null>;
   limitations: string[];
   statistics?: Record<string, unknown>;
   coverage?: { sources: string[]; cycles: string[] };
+};
+
+export type CorpusCoverageStats = {
+  totalProfiles: number;
+  sourceCoverage: { source: string; profiles: number }[];
+  cycles: { cycle: string; profiles: number }[];
+  reviewedAt: string | null;
+  release: string | null;
+  limitations: string[];
+  knownOutcomeProfiles: number;
+  alignedOutcomeProfiles: number;
+  profileOnlyCount: number;
+  missingness: {
+    gpa: number;
+    scienceGpa: number;
+    mcat: number;
+    cycle: number;
+    activities: number;
+    acceptanceOrRejection: number;
+    applicationTimeActivityHours: number;
+  };
+  numericEligibility: { gpa: number; scienceGpa: number; mcat: number };
+  evidenceTierCoverage: { tier: string; profiles: number }[];
+  reviewMethodCoverage: { method: string; profiles: number }[];
 };
 
 export type Evidence = {

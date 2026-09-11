@@ -85,8 +85,23 @@ identities are not merged by inference.
 - Retrieved/examined: bounded profile summaries supplied to the model.
 - Supporting: distinct retrieved accounts whose source IDs occur in the answer.
   This measures cited support, not a separate factual-verification pass.
-- Reported outcomes: matching accounts with an explicit, unconditional,
-  same-cycle acceptance or rejection. Interviews/waitlists remain separate states.
+- Same-cycle outcomes: matching accounts with an explicit, unconditional medical
+  acceptance or rejection aligned to a known profile cycle. Interviews/waitlists
+  remain separate states.
+- Any reported outcomes: matching accounts with an explicit medical acceptance or
+  rejection, including reports whose cycle is unknown or different from the
+  selected profile. These are factual history, not same-cycle comparisons.
+- Reported and exact-usable academics: separate populations. An approximate GPA
+  is reported information but cannot participate in exact numeric filters or
+  medians. Missing means unreported, not merely ineligible for arithmetic.
+
+Profiles may contain useful reviewed facts while lacking academics, activities,
+an application cycle, or outcomes. The inspector exposes those omissions,
+evidence tier, source timing, and review method. Machine extraction alone does
+not qualify a record for retrieval. Field validation and selective independent
+model review are identified as such; they are not presented as human review.
+An unknown cycle stays unknown rather than being inferred from a post date.
+Known cycles sort before unknown snapshots when choosing one profile per account.
 
 The model receives separate available, matching, retrieved, and numeric-summary
 population fields. Supporting is defined only as distinct retrieved source
@@ -99,8 +114,12 @@ panel instead of an added count statement.
 
 Deterministic numeric summaries can use up to 1,000 matching accounts, separately
 from the smaller retrieved sample. Each statistic records its own included and
-excluded counts. Hours exclude ranges, estimates, projections, mixed-cycle
-timing, and unreported quantities; explicit zero is retained. An excluded value
+excluded counts. GPA, science GPA, and MCAT summaries exclude approximate values,
+ranges, and bounds while preserving their qualified values in the inspector.
+Hours exclude ranges, estimates, projections, mixed-cycle timing, and unreported
+quantities; explicit zero is retained. Separate activity roles are not summed
+automatically. A category total must be explicitly reviewed as complete,
+nonoverlapping, and eligible for the same timing comparison. An excluded value
 does not necessarily mean the applicant provided no information.
 
 Sources and calculations have saved citation IDs, URLs where applicable,

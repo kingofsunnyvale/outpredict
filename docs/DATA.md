@@ -50,9 +50,10 @@ The original local audit and retrieved source captures remain the reproducible
 collection inputs. The one-time normalized release is `data/corpus.json`; runtime
 does not scrape sites. Future updates edit or extend this reviewed JSON and pass
 the validator before import. A new observation should use a new profile ID and
-increment `version`, preserving prior rows; the importer makes only the newest
-imported account/cycle version current. Correcting an existing ID updates that
-reviewed record idempotently. Excluded/unreviewed records never enter the query
+increment `version`, preserving prior rows; the importer makes the release's
+selected account/cycle version current. Reimporting an identical ID and facts is
+idempotent. Corrected facts require a new profile ID and version so an earlier
+release can still be audited. Excluded/unreviewed records never enter the query
 surface.
 
 ## Measurement and outcome rules
@@ -65,11 +66,13 @@ surface.
 - Hours preserve exact reports, approximations, ranges, lower/upper bounds,
   explicit absence, and unreported values. Durations in years are not converted
   into invented hours. Projected work is excluded from completed-hour summaries.
-- `retrospective_mixed` identifies two SDN profiles whose later activity snapshots
-  describe an earlier outcome cycle. Their hours are excluded from outcome-cohort
-  summaries. Other known post-submission additions are specifically excluded or
-  recorded in notes. Most public reports still do not establish exact hours at
-  primary submission; comparison language must say “reported hours.”
+- `retrospective_mixed` excludes activity amounts whose application-time alignment
+  is unestablished, including later updates attached to an earlier outcome. The
+  baseline contains two such SDN profiles. New outcome-bearing snapshots use this
+  conservative treatment unless timing is separately established. Other known
+  post-submission additions are excluded or recorded in notes. Most public reports
+  do not establish exact hours at primary submission; comparison language must
+  say “reported hours.”
 - Accepted, rejected, interview, waitlisted, withdrawn, pending, and unknown are
   distinct. A waitlist followed by withdrawal remains two observations. A combined
   “waitlists/rejections” number is never arbitrarily split. “Accepted: No,” silence,
@@ -90,8 +93,10 @@ surface.
 Filters accept GPA/MCAT intervals, cycles, sources, explicit outcome statuses,
 activity text, and school text. They are validated and bound as SQL parameters.
 Unknown filters fail instead of silently widening a search. Text wildcards are
-escaped. When an account has several matching cycles, the latest matching cycle
-is selected for display and statistics, keeping one account per count.
+escaped. The explicit `unknown` cycle is searchable. When an account has several
+matching snapshots, known cycles sort before unknown cycles and the latest known
+matching cycle is selected, keeping one account per count. Selecting unknown
+explicitly does not establish that undated events share one application cycle.
 
 Returned counts mean:
 
@@ -100,7 +105,12 @@ Returned counts mean:
 | `total` | Distinct reviewed source accounts available in current profile versions. |
 | `matched` | Distinct accounts satisfying the supplied filters. |
 | `examined` | Full profile records retrieved for the answer, bounded by `limit` (1–20). This is not a claim of model review of every match. |
-| `withReportedOutcomes` | Matching accounts with explicit, nonconditional acceptance/rejection evidence in their selected cycle. |
+| `withReportedOutcomes` | Matching accounts with actual, nonconditional medical-school acceptance/rejection evidence aligned to a known selected cycle. |
+| `withAnyReportedOutcomes` | Matching accounts with an actual medical-school acceptance/rejection in the selected profile, including unaligned or unknown-cycle reports. |
+| `withoutReportedOutcomes` | Matching accounts with no reported actual acceptance/rejection; this does not establish that none occurred. |
+| `withKnownCycle` | Matching accounts with a reported application cycle. |
+| `withReportedGpa`, `withReportedMcat` | Matching accounts reporting the metric, including supported approximate, ranged or bounded values. |
+| `withUsableGpa`, `withUsableMcat` | Matching accounts with exact scalar values eligible for numerical filters and summaries. |
 | `summarized` | Matching accounts read for deterministic numerical summaries, at most 1,000. |
 
 The application determines **supporting profiles** from distinct retrieved source
@@ -111,8 +121,13 @@ counts in the evidence panel. See [RUNTIME.md](RUNTIME.md).
 Source and cycle coverage describe the matched account set. Summaries report `n`
 and excluded/missing denominator separately for each statistic. Hour medians use
 only exact numerical reports or explicit zero, excluding estimates, ranges,
-projections, and mixed timing. Described roles with unknown hours remain retrievable
-and inspectable. Numerical summaries do not establish causality or probabilities.
+projections, and mixed timing. New records require separately reviewed category
+totals with established coverage, no overlap and compatible timing; distinct role
+names alone do not justify summing their hours. Source-date totals are not
+automatically amounts available at application. Described roles with unknown
+hours remain retrievable and inspectable. Approximate/ranged academics remain
+visible measurements but do not qualify exact numerical filters or medians.
+Numerical summaries do not establish causality or probabilities.
 
 ## Validation and import
 
@@ -153,27 +168,46 @@ The initial release shipped through
 58 checksum-verified private artifacts. Live `/api/corpus/stats` returned the same
 source/cycle coverage in both environments.
 
-## Later collection
+## Expanded collection and partial profiles
 
 [OUT-11](https://linear.app/outpredict/issue/OUT-11/expand-the-reviewed-student-forum-corpus-across-accessible-public)
-is queued for a later subagent handoff after the product release. It seeks as much
-accessible public applicant-forum coverage as practical, with no numerical target
-or artificial record cap. Collection has not started. The existing SDN inventory
-contains 3,239 threads and 2,882 source accounts; these are discovery counts, not
-qualifying records or verified distinct people.
+tracks the expanded collection in this build. It seeks as much accessible public
+applicant-forum coverage as practical, with no numerical target or artificial
+record cap. The collector follows the recent SDN thread inventory, pagination and
+original-author updates, and the public MDApplicants listing to exhaustion of the
+in-scope frontier. The snapshot covers threads created from May 1, 2023 through
+the collection cutoff, relevant later author updates, and recent listed profiles.
+Out-of-window discoveries remain separately counted rather than becoming an
+unbounded older-history crawl. Reddit's robots policy blocks the new collection;
+blocked resources receive no page request, and existing reviewed records remain.
 
 Raw source coverage and the reviewed queryable corpus are separate measures.
-Maximizing collection must not silently relax the initial release's academic,
-activity, or explicit-outcome qualification standard to inflate its counts.
-The validator permits null GPA/MCAT values but still requires multiple activity
-categories and explicit acceptance/rejection evidence; all 58 current profiles
-have numerical GPA/MCAT. Broader incomplete profiles can be retained as incomplete source
-material. Making them queryable requires deliberate missingness/schema, query,
-and UI-count support, tested in staging. Unknown outcomes must never enter the
-known acceptance/rejection denominator by inference.
+The initial 58 profile objects are preserved. Version 2 deliberately supports
+useful partial records, with corresponding validator, query and interface changes.
+`reviewed_outcome_report` identifies a source report with an actual unconditional
+medical-school acceptance/rejection; `reviewed_profile` identifies other useful
+supported profile facts. Neither tier claims a complete application or final
+cycle. Missing academics, activities, cycles and outcomes remain explicit and
+independent. Approximate or ranged academic values are reported measurements;
+their unavailable exact scalars are distinguished from wholly unreported metrics.
 
-The later pipeline must be resumable and rate-compliant, respect access boundaries,
-preserve canonical provenance and account/cycle versions, and report exact
+Extraction uses the exact Sol API model, followed by deterministic witness and
+numeric checks. Outcome-bearing, conflicting, multi-update and flagged records
+receive an independent semantic review. Source spans retain post IDs, timestamps,
+URLs, artifact hashes, Unicode code-point offsets and short exact excerpts.
+Numeric replies can depend on a quoted question by another author. The source
+context check keeps that attribution separate and excludes ambiguous metric
+identities; a bare reply must not turn science GPA into cumulative GPA.
+Unresolved fields are omitted or retained only as supported narrative. Extractions
+and field-reviewed candidates do not become queryable until normalized release
+validation and staged import pass. Actual review methods are displayed; model
+review is never presented as uniform human adjudication.
+
+The pipeline is resumable and rate-compliant, respects access boundaries,
+preserves canonical provenance and account/cycle versions, and reports exact
 visited, parsed, reviewed, imported, excluded, failed, and missingness counts.
 Collection and backfills remain separate from runtime: the product searches the
-reviewed student corpus and does not open outside webpages.
+reviewed student corpus and does not open outside webpages. Raw HTML, source
+transcripts and review manifests remain private audit artifacts; normalized
+release facts and bounded evidence are versioned in Git. Final release counts and
+collection boundaries are recorded separately from historical baseline counts.

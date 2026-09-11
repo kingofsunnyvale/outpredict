@@ -6,7 +6,10 @@ import {
 import {
   type CohortResult,
   type CorpusProfile,
+  exactAcademic,
   inspectProfile,
+  isKnownCycle,
+  isMedicalProgram,
   searchCohort,
 } from "./cohort";
 import {
@@ -61,6 +64,8 @@ Evidence and interpretation rules:
 - Supporting applicants means distinct retrieved source accounts whose profile citations actually appear in this answer. It NEVER means the numeric-summary population, a statistic's n, the matching population, or all retrieved profiles. The application computes supporting count after the answer. Leave the four cohort count labels and their numbers to the application's Evidence counts receipt/panel; explain profile differences and individual statistics without inventing a count summary.
 - A missing hour value means hours are unreported, not that the activity itself is unreported. Publications and other narrative-only categories are described by their exact reported text, not hours. If the publication text reports none but mentions a thesis/poster or future manuscripts, preserve that distinction; do not call publications unreported.
 - Say one applicant has higher/lower or more/fewer hours than another only when both report numeric values for the same category, with comparable cycle/timing and precision that supports that ordering. If either value is missing or unquantified, or uncertain ranges overlap, state that the numeric comparison is unavailable and preserve each applicant's reported activity narrative.
+- Academic measurement precision matters: approximate/range/bounded values are reported, not exact and not wholly unreported. Use academicMeasurements to describe them and do not force a null exact scalar into a point comparison or median.
+- Partial profiles and unknown cycles are useful source reports, not complete applications. Only known same-cycle outcomes may be associated with that cycle; unalignedReportedOutcomes are separate historical facts. No reported acceptance is not proof of no acceptance. Source-date activity hours are not automatically available at application. New role rows cannot be summed or treated as category totals unless the deterministic tool supplies an eligible total.
 - Applicant outcomes are school-specific. A rejection at one school does not mean no acceptance elsewhere. Accepted: No is UNKNOWN unless an explicit decision is present. Missing hours are not zero. Planned hours are not completed. Shadowing is separate from clinical service.
 - The corpus is a small self-selected convenience sample. It cannot establish typical/national profiles, causal effects, competitiveness, rankings, or personal admission odds. Never say a metric caused or did not cause an outcome. Do not call an applicant competitive, weak, strong, or an outlier based on this sample.
 - Medians describe the reported sample ONLY. They are not admissions targets, thresholds, benchmarks, or recommended hours. Never recommend increasing hours to hit a median or copy a successful applicant. Explain relevant missingness and sample size where the comparison is used.
@@ -483,6 +488,16 @@ export function cohortCountEvidence(counts: CohortResult["counts"]) {
     matchingApplicants: counts.matched,
     retrievedApplicants: counts.examined,
     applicantsWithExplicitOutcomes: counts.withReportedOutcomes,
+    knownSameCycleOutcomeApplicants: counts.withReportedOutcomes,
+    applicantsWithAnyExplicitOutcomes: counts.withAnyReportedOutcomes,
+    applicantsWithoutReportedOutcomes: counts.withoutReportedOutcomes,
+    applicantsWithKnownCycle: counts.withKnownCycle,
+    applicantsWithReportedGpa: counts.withReportedGpa,
+    applicantsWithReportedMcat: counts.withReportedMcat,
+    applicantsWithUsableGpa: counts.withUsableGpa,
+    applicantsWithUsableMcat: counts.withUsableMcat,
+    outcomeCountDefinition:
+      "Known-cycle counts require actual unconditional acceptance/rejection in a known matching cycle. Any-outcome counts include unknown-cycle reports. No reported outcome does not mean none occurred.",
     numericSummaryPopulation: counts.summarized,
     supportingApplicants: null as number | null,
     supportingCountStatus: "computed after final answer citations",
@@ -510,9 +525,22 @@ export function evidenceCountStatement(
 
 /** Give the model the reviewed cycle snapshot, not later/conditional outcomes. */
 export function profileEvidence(profile: CorpusProfile) {
-  const mixedTiming = profile.timingStatus === "retrospective_mixed";
+  const knownCycle = isKnownCycle(profile.cycle);
+  const mixedTiming = profile.timingStatus !== "cycle_report";
+  const sourceSnapshot = profile.timingStatus === "source_snapshot";
+  const newProfile = Boolean(profile.evidenceTier);
   const outcomes = profile.outcomes.filter(
-    (outcome) => outcome.cycle === profile.cycle && !outcome.conditional,
+    (outcome) =>
+      knownCycle &&
+      outcome.cycle === profile.cycle &&
+      !outcome.conditional &&
+      isMedicalProgram(outcome.program),
+  );
+  const unalignedReportedOutcomes = profile.outcomes.filter(
+    (outcome) =>
+      !outcome.conditional &&
+      isMedicalProgram(outcome.program) &&
+      (!knownCycle || outcome.cycle !== profile.cycle),
   );
   const hasAcceptance = outcomes.some(
     (outcome) => outcome.status === "accepted",
@@ -522,29 +550,67 @@ export function profileEvidence(profile: CorpusProfile) {
     accountId: profile.accountId,
     source: profile.source,
     cycle: profile.cycle,
-    gpa: profile.gpa,
-    scienceGpa: profile.scienceGpa,
-    mcat: profile.mcat,
+    gpa: exactAcademic(profile, "gpa"),
+    scienceGpa: exactAcademic(profile, "scienceGpa"),
+    mcat: exactAcademic(profile, "mcat"),
+    academicMeasurements: profile.academicMeasurements ?? {},
+    unavailableNumericFields: profile.unavailableNumericFields ?? [],
+    academicInterpretation:
+      "Scalar values are exact usable measurements. A null scalar with a reported academicMeasurement means an approximate, bounded or range value was reported; preserve its precision instead of calling it unreported or exact.",
     residence: profile.residence,
+    evidenceTier: profile.evidenceTier ?? "legacy_reviewed_outcome_report",
+    reviewMethod: profile.reviewMethod ?? "legacy_single_reviewer",
+    missingFields: profile.missingFields ?? [],
+    sourceSnapshotAt: profile.sourceSnapshotAt ?? profile.authoredAt,
     summary: mixedTiming
-      ? `${profile.cycle} applicant with retrospectively reported activities spanning this cycle and later experience. Numeric activity amounts are omitted because the amount completed before this application is not known.`
+      ? newProfile
+        ? `Source-date applicant report; ${knownCycle ? `selected cycle ${profile.cycle}` : "application cycle unreported"}. Activity totals are not established at application. Reported roles remain useful, and unreported fields or outcomes are not zero or negative decisions.`
+        : `${profile.cycle} applicant with retrospectively reported activities spanning this cycle and later experience. Numeric activity amounts are omitted because the amount completed before this application is not known.`
       : profile.summary.slice(0, 2000),
     activities: profile.activities.map((activity) => {
       const narrativeOnly = ["publications", "other"].includes(
         activity.category,
       );
-      if (mixedTiming)
+      if (mixedTiming && !(sourceSnapshot && newProfile))
         return {
           category: activity.category,
           timing: activity.timing,
+          ...(newProfile
+            ? {
+                // Normalized role text is useful even when its hour alignment is
+                // unknown. Remove explicit hour quantities, retaining publication
+                // or poster counts rather than erasing the activity itself.
+                description: activity.description
+                  .replace(
+                    /(?:[~≈<>≥≤]\s*)?\d[\d,.]*(?:\s*[-–—]\s*\d[\d,.]*)?\+?\s*(?:hours?|hrs?)\b/gi,
+                    "[reported hours omitted]",
+                  )
+                  .slice(0, 500),
+                reportedText: activity.description
+                  .replace(
+                    /(?:[~≈<>≥≤]\s*)?\d[\d,.]*(?:\s*[-–—]\s*\d[\d,.]*)?\+?\s*(?:hours?|hrs?)\b/gi,
+                    "[reported hours omitted]",
+                  )
+                  .slice(0, 500),
+              }
+            : {}),
           ...(narrativeOnly ? {} : { cycleHours: null }),
-          reportingStatus: "mixed_timing_not_attributed_to_cycle",
+          reportingStatus: newProfile
+            ? "reported_role_hours_not_aligned_to_application"
+            : "mixed_timing_not_attributed_to_cycle",
           exclusionReason:
             "Reported totals mix this cycle and later experience. Do not associate those totals with this cycle's outcome. The full source record remains available in the profile inspector.",
         };
       const { hours, description, ...metadata } = activity;
       return {
         ...metadata,
+        ...(sourceSnapshot
+          ? {
+              cycleHours: null,
+              comparisonEligibility:
+                "source_date_report_only_not_application_time",
+            }
+          : {}),
         description: description.slice(0, 500),
         reportedText: description.slice(0, 500),
         reportingStatus: description.trim()
@@ -564,9 +630,18 @@ export function profileEvidence(profile: CorpusProfile) {
       ...outcome,
       evidence: outcome.evidence.slice(0, 400),
     })),
-    outcomeInterpretation: hasAcceptance
-      ? "At least one explicit acceptance is reported for this cycle. Do not infer other school decisions."
-      : "NO explicit acceptance is present for this cycle. Do not describe this applicant as accepted or as accepted elsewhere. Unreported decisions remain unknown.",
+    unalignedReportedOutcomes: unalignedReportedOutcomes.map((outcome) => ({
+      ...outcome,
+      evidence: outcome.evidence.slice(0, 400),
+    })),
+    outcomeAlignment: knownCycle
+      ? "known_selected_cycle"
+      : "cycle_unreported_no_alignment",
+    outcomeInterpretation: !knownCycle
+      ? "Application cycle is unreported. Actual events in unalignedReportedOutcomes remain source-reported facts, but cannot establish outcomes for a known cycle or relate source-date metrics to an outcome. Empty outcome reports do not mean no acceptance occurred."
+      : hasAcceptance
+        ? "At least one explicit acceptance is reported for this cycle. Do not infer other school decisions."
+        : "NO explicit acceptance is present for this cycle. This does not mean none occurred. Decisions outside the selected cycle and unreported decisions remain separate or unknown.",
     excludedOutcomeEvents: profile.outcomes.length - outcomes.length,
     timingStatus: profile.timingStatus,
     notes: profile.notes,
@@ -751,7 +826,7 @@ export async function runAgent(
     const source: Source = {
       id: `P${++profileNumber}`,
       kind: "profile",
-      title: `${profile.source} applicant · ${profile.cycle}`,
+      title: `${profile.source} applicant · ${isKnownCycle(profile.cycle) ? profile.cycle : "cycle unreported"}`,
       applicantId: profile.accountId,
       profileId: profile.id,
       ...(url ? { url } : {}),
@@ -874,15 +949,24 @@ export async function runAgent(
           examinedProfiles: result.counts.examined,
           supportingProfiles: 0,
           profilesWithOutcomes: result.counts.withReportedOutcomes,
+          profilesWithAnyOutcomes: result.counts.withAnyReportedOutcomes,
+          profilesWithoutOutcomes: result.counts.withoutReportedOutcomes,
+          profilesWithKnownCycle: result.counts.withKnownCycle,
+          profilesWithReportedGpa: result.counts.withReportedGpa,
+          profilesWithReportedMcat: result.counts.withReportedMcat,
+          profilesWithUsableGpa: result.counts.withUsableGpa,
+          profilesWithUsableMcat: result.counts.withUsableMcat,
           filters,
           limitations: result.limitations,
           statistics: result.statistics,
           coverage: {
             sources: result.coverage.sources.map(
-              (entry) => `${entry.value}: ${entry.count}`,
+              (entry) =>
+                `${entry.value === "unknown" ? "Cycle unreported" : entry.value}: ${entry.count}`,
             ),
             cycles: result.coverage.cycles.map(
-              (entry) => `${entry.value}: ${entry.count}`,
+              (entry) =>
+                `${entry.value === "unknown" ? "Cycle unreported" : entry.value}: ${entry.count}`,
             ),
           },
         };
@@ -930,7 +1014,7 @@ export async function runAgent(
           type: "progress",
           stage: "cohort_results",
           title: `${result.counts.matched} matching applicants`,
-          detail: `${result.counts.examined} profile summaries retrieved from ${result.counts.total} available applicants. ${result.counts.withReportedOutcomes} matches report at least one explicit acceptance or rejection this cycle.`,
+          detail: `${result.counts.examined} profile summaries retrieved from ${result.counts.total} available source accounts. ${result.counts.withAnyReportedOutcomes} matches report an actual acceptance or rejection; ${result.counts.withReportedOutcomes} have that evidence aligned to a known selected cycle.`,
         });
         await publishEvidence();
         return {

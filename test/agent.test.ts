@@ -157,7 +157,14 @@ describe("model evidence and stream boundaries", () => {
       total: 58,
       matched: 58,
       examined: 2,
-      withReportedOutcomes: 58,
+      withReportedOutcomes: 20,
+      withAnyReportedOutcomes: 30,
+      withoutReportedOutcomes: 28,
+      withKnownCycle: 40,
+      withReportedGpa: 45,
+      withReportedMcat: 35,
+      withUsableGpa: 40,
+      withUsableMcat: 30,
       summarized: 58,
     });
     expect(counts).toMatchObject({
@@ -165,6 +172,10 @@ describe("model evidence and stream boundaries", () => {
       matchingApplicants: 58,
       retrievedApplicants: 2,
       numericSummaryPopulation: 58,
+      knownSameCycleOutcomeApplicants: 20,
+      applicantsWithAnyExplicitOutcomes: 30,
+      applicantsWithoutReportedOutcomes: 28,
+      applicantsWithKnownCycle: 40,
       supportingApplicants: null,
       maximumPossibleSupportingApplicants: 2,
     });

@@ -45,3 +45,14 @@ Screenshots were compared with the captured LightReel screens. These private
 verification artifacts stay outside Git because account UI can contain identity
 details. Final staging and production evidence is recorded in TOOLING.md and the
 linked Linear issues. API ownership/deletion checks complement browser checks.
+
+Canonical production acceptance on September 10, 2026 verified real Google
+login with a preserved draft, logout, an ordinary answer, PDF and PNG extraction,
+a résumé plan and changed-budget follow-up, source/profile inspection, saved
+history after reload, and 390 × 844 mobile navigation, evidence and composer.
+The follow-up used 58 available accounts, 13 matching its GPA/MCAT filters, two
+retrieved and two cited supporting accounts. These are the baseline release's
+observed test counts, not a limit on future corpus size. One initial PDF answer
+was interrupted; retry preserved the question and completed successfully.
+The completed plan and follow-up respected the combined weekly time allowance
+and kept completed clinical hours separate from projections.

@@ -29,6 +29,9 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: node scripts/validate-corpus.mjs
+      - run: npm run test:corpus-pipeline
+      - run: python3 -m pip install uv==0.10.8
+      - run: npm run test:collection
       - run: node scripts/smoke-product.mjs --self-test
       - run: npm test
       - run: npm run build
